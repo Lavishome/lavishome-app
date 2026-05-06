@@ -7,12 +7,12 @@ import { initializeApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
-  apiKey: "AIzaSyDllHiiTIMQ2ZBux9Kt_el_iW3yszdd1Ck",
-  authDomain: "lavishome.firebaseapp.com",
-  projectId: "lavishome",
-  storageBucket: "lavishome.firebasestorage.app",
-  messagingSenderId: "787997823088",
-  appId: "1:787997823088:web:d90b61470d26f7dd07a4b5",
+  apiKey:            "PASTE_YOUR_API_KEY_HERE",
+  authDomain:        "PASTE_YOUR_AUTH_DOMAIN_HERE",
+  projectId:         "PASTE_YOUR_PROJECT_ID_HERE",
+  storageBucket:     "PASTE_YOUR_STORAGE_BUCKET_HERE",
+  messagingSenderId: "PASTE_YOUR_MESSAGING_SENDER_ID_HERE",
+  appId:             "PASTE_YOUR_APP_ID_HERE",
 };
 
 const app = initializeApp(firebaseConfig);
