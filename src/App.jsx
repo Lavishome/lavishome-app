@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { db } from "./firebase";
-import { doc, onSnapshot, setDoc } from "firebase/firestore";
+import {
+  collection, doc,
+  onSnapshot, setDoc, deleteDoc, getDoc,
+} from "firebase/firestore";
 
 // ── Colour tokens ────────────────────────────────────────────────────────
 const G = {
@@ -27,9 +30,9 @@ const TXN_TYPES = {
 const TXN_KEYS = Object.keys(TXN_TYPES);
 
 const STATUS_META = {
-  Pending:  { color:"#b86010", bg:"#b8601018", border:"#b8601044", label:"⏳ Pending"  },
-  Accepted: { color:"#1a6e3a", bg:"#1a6e3a18", border:"#1a6e3a44", label:"✅ Accepted" },
-  Declined: { color:"#7a6e62", bg:"#7a6e6218", border:"#7a6e6244", label:"❌ Declined" },
+  Pending:  {color:"#b86010",bg:"#b8601018",border:"#b8601044",label:"⏳ Pending"},
+  Accepted: {color:"#1a6e3a",bg:"#1a6e3a18",border:"#1a6e3a44",label:"✅ Accepted"},
+  Declined: {color:"#7a6e62",bg:"#7a6e6218",border:"#7a6e6244",label:"❌ Declined"},
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -42,6 +45,39 @@ function marginColor(m){if(m===null)return G.muted;if(m>=40)return G.ok;if(m>=20
 function todayStr(){return new Date().toISOString().split("T")[0];}
 function addDays(ds,d){const dt=new Date(ds+"T00:00:00");dt.setDate(dt.getDate()+d);return dt.toLocaleDateString("en-CA",{year:"numeric",month:"long",day:"numeric"});}
 function makeRef(){return"QT-"+Date.now().toString().slice(-6);}
+
+// ── Photo compression ────────────────────────────────────────────────────
+// Resizes and compresses photos to max 600px wide, 70% JPEG quality
+// Reduces a typical phone photo from ~400KB to ~30KB (13x smaller)
+function compressPhoto(dataUrl, maxWidth=600, quality=0.7){
+  return new Promise(resolve=>{
+    const img=new Image();
+    img.onload=()=>{
+      const ratio=Math.min(maxWidth/img.width,1);
+      const canvas=document.createElement("canvas");
+      canvas.width=Math.round(img.width*ratio);
+      canvas.height=Math.round(img.height*ratio);
+      canvas.getContext("2d").drawImage(img,0,0,canvas.width,canvas.height);
+      resolve(canvas.toDataURL("image/jpeg",quality));
+    };
+    img.onerror=()=>resolve(dataUrl); // fallback: keep original if error
+    img.src=dataUrl;
+  });
+}
+
+// ── Firebase save with retry ─────────────────────────────────────────────
+// Tries up to 3 times with a 1s gap before giving up
+async function saveWithRetry(ref, data, attempts=3){
+  for(let i=0;i<attempts;i++){
+    try{
+      await setDoc(ref,data);
+      return true;
+    }catch(e){
+      if(i<attempts-1) await new Promise(r=>setTimeout(r,1000));
+    }
+  }
+  return false;
+}
 
 // ── Mobile hook ──────────────────────────────────────────────────────────
 function useIsMobile(){
@@ -107,11 +143,11 @@ function ModalWrap({onClose,children,maxW=540}){
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-//  QUOTE PAGE GENERATOR  (opens new browser tab)
+//  QUOTE PAGE GENERATOR
 // ══════════════════════════════════════════════════════════════════════════
-function generateQuotePage(selectedProds, quoteInfo, existingRef=null){
+function generateQuotePage(selectedProds,quoteInfo,existingRef=null){
   const{clientName,preparedBy,notes,discountType,discountValue,quoteDate}=quoteInfo;
-  const quoteRef = existingRef || makeRef();
+  const quoteRef=existingRef||makeRef();
   const subtotal=selectedProds.reduce((s,p)=>s+p.price*(p.qty||1),0);
   const discAmt=discountType==="%"?subtotal*(parseFloat(discountValue)||0)/100:parseFloat(discountValue)||0;
   const total=Math.max(0,subtotal-discAmt);
@@ -125,14 +161,8 @@ function generateQuotePage(selectedProds, quoteInfo, existingRef=null){
   const html=`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Lavishome Quote — ${clientName}</title><link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet"><style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:'DM Sans',sans-serif;background:#f5f1eb;color:#1c1814;padding:24px 16px}.page{max-width:860px;margin:0 auto;background:#fff;border-radius:16px;box-shadow:0 4px 32px rgba(0,0,0,0.10);overflow:hidden}.print-btn{position:fixed;bottom:20px;right:20px;background:#6a4e10;color:#fff;border:none;border-radius:999px;padding:12px 24px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:700;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,0.18);z-index:100}table{width:100%;border-collapse:collapse}tbody tr{border-bottom:1px solid #ede8e0}@media print{body{background:#fff;padding:0}.page{box-shadow:none;border-radius:0}.print-btn{display:none}}@media(max-width:600px){.hdr-flex{flex-direction:column!important;gap:12px!important;text-align:center!important}.info-grid{grid-template-columns:1fr!important}}</style></head><body>
 <button class="print-btn" onclick="window.print()">🖨️ Print / Save as PDF</button>
 <div class="page">
-<div style="background:#6a4e10;padding:28px 32px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px" class="hdr-flex">
-  <div><div style="font-family:'Playfair Display',serif;font-size:26px;font-weight:700;color:#fff;letter-spacing:0.04em">LAVISHOME</div><div style="font-size:10px;color:#e8c27a;letter-spacing:0.2em;text-transform:uppercase;margin-top:3px">Luxury Furniture</div></div>
-  <div style="text-align:right"><div style="font-family:'Playfair Display',serif;font-size:20px;font-weight:600;color:#fff">Quote / Estimate</div><div style="font-size:12px;color:#e8c27a;margin-top:3px;font-family:monospace">${quoteRef}</div></div>
-</div>
-<div style="padding:24px 32px;display:grid;grid-template-columns:1fr 1fr;gap:24px;border-bottom:1px solid #ede8e0" class="info-grid">
-  <div><div style="font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.12em;font-weight:700;margin-bottom:6px">Prepared For</div><div style="font-family:'Playfair Display',serif;font-size:20px;font-weight:600;color:#1c1814">${clientName}</div></div>
-  <div style="text-align:right"><div style="margin-bottom:6px"><span style="font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.1em">Date: </span><span style="font-size:13px;color:#1c1814;font-weight:600">${fmtDate(quoteDate)}</span></div><div style="margin-bottom:6px"><span style="font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.1em">Prepared By: </span><span style="font-size:13px;color:#1c1814;font-weight:600">${preparedBy||"Lavishome Team"}</span></div><div style="background:#fff8e8;border:1px solid #e8c27a44;border-radius:8px;padding:6px 12px;display:inline-block;margin-top:2px"><span style="font-size:11px;color:#8a6820;font-weight:700">⏱ Valid until ${validUntil} or while stocks last</span></div></div>
-</div>
+<div style="background:#6a4e10;padding:28px 32px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px" class="hdr-flex"><div><div style="font-family:'Playfair Display',serif;font-size:26px;font-weight:700;color:#fff;letter-spacing:0.04em">LAVISHOME</div><div style="font-size:10px;color:#e8c27a;letter-spacing:0.2em;text-transform:uppercase;margin-top:3px">Luxury Furniture</div></div><div style="text-align:right"><div style="font-family:'Playfair Display',serif;font-size:20px;font-weight:600;color:#fff">Quote / Estimate</div><div style="font-size:12px;color:#e8c27a;margin-top:3px;font-family:monospace">${quoteRef}</div></div></div>
+<div style="padding:24px 32px;display:grid;grid-template-columns:1fr 1fr;gap:24px;border-bottom:1px solid #ede8e0" class="info-grid"><div><div style="font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.12em;font-weight:700;margin-bottom:6px">Prepared For</div><div style="font-family:'Playfair Display',serif;font-size:20px;font-weight:600;color:#1c1814">${clientName}</div></div><div style="text-align:right"><div style="margin-bottom:6px"><span style="font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.1em">Date: </span><span style="font-size:13px;color:#1c1814;font-weight:600">${fmtDate(quoteDate)}</span></div><div style="margin-bottom:6px"><span style="font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.1em">Prepared By: </span><span style="font-size:13px;color:#1c1814;font-weight:600">${preparedBy||"Lavishome Team"}</span></div><div style="background:#fff8e8;border:1px solid #e8c27a44;border-radius:8px;padding:6px 12px;display:inline-block;margin-top:2px"><span style="font-size:11px;color:#8a6820;font-weight:700">⏱ Valid until ${validUntil} or while stocks last</span></div></div></div>
 <div style="padding:0 32px"><table><thead><tr style="border-bottom:2px solid #ddd4c4"><th style="padding:12px;text-align:left;font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.1em;font-weight:700;width:100px">Photo</th><th style="padding:12px;text-align:left;font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.1em;font-weight:700">Product</th><th style="padding:12px;text-align:center;font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.1em;font-weight:700;width:60px">Qty</th><th style="padding:12px;text-align:right;font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.1em;font-weight:700;width:110px">Unit Price</th><th style="padding:12px;text-align:right;font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.1em;font-weight:700;width:110px">Total</th></tr></thead><tbody>${productRows}</tbody></table></div>
 <div style="padding:20px 32px;border-top:2px solid #ede8e0;margin-top:6px"><table style="max-width:320px;margin-left:auto"><tbody><tr><td style="padding:7px 12px;color:#7a6e62;font-size:13px">Subtotal</td><td style="padding:7px 12px;text-align:right;font-size:13px;font-weight:600;color:#1c1814">${fmt(subtotal)}</td></tr>${discountRow}<tr style="border-top:2px solid #ddd4c4"><td style="padding:12px;font-family:'Playfair Display',serif;font-size:16px;font-weight:700;color:#6a4e10">Total (CAD)</td><td style="padding:12px;text-align:right;font-family:'Playfair Display',serif;font-size:20px;font-weight:700;color:#6a4e10">${fmt(total)}</td></tr></tbody></table></div>
 ${notes?`<div style="padding:18px 32px;border-top:1px solid #ede8e0;background:#faf8f5"><div style="font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.12em;font-weight:700;margin-bottom:6px">Notes</div><div style="font-size:13px;color:#1c1814;line-height:1.7">${notes}</div></div>`:""}
@@ -212,21 +242,14 @@ function QuoteBuilderModal({selectedProds,onRemove,onUpdateQty,onClose,onGenerat
   const subtotal=selectedProds.reduce((s,p)=>s+p.price*(p.qty||1),0);
   const discAmt=discountType==="%"?subtotal*(parseFloat(discountValue)||0)/100:parseFloat(discountValue)||0;
   const total=Math.max(0,subtotal-discAmt);
-  function handleGenerate(){
-    if(!clientName.trim())return alert("Please enter the client name.");
-    onGenerate({clientName,preparedBy,notes,discountType,discountValue,quoteDate});
-  }
+  function handleGenerate(){if(!clientName.trim())return alert("Please enter the client name.");onGenerate({clientName,preparedBy,notes,discountType,discountValue,quoteDate});}
   return(
     <ModalWrap onClose={onClose} maxW={600}>
       <div className="lh-modal-pad" style={{padding:"22px 24px"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
-          <div>
-            <h2 style={{color:G.goldL,fontFamily:"'Playfair Display',serif",fontSize:isMobile?18:21,fontWeight:700}}>Create Quote</h2>
-            <div style={{fontSize:12,color:G.muted,marginTop:3}}>{selectedProds.length} product{selectedProds.length>1?"s":""} selected</div>
-          </div>
+          <div><h2 style={{color:G.goldL,fontFamily:"'Playfair Display',serif",fontSize:isMobile?18:21,fontWeight:700}}>Create Quote</h2><div style={{fontSize:12,color:G.muted,marginTop:3}}>{selectedProds.length} product{selectedProds.length>1?"s":""} selected</div></div>
           <button onClick={onClose} style={{background:"none",border:"none",color:G.muted,fontSize:24,cursor:"pointer"}}>×</button>
         </div>
-        {/* Selected products */}
         <div style={{background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:10,padding:"12px 14px",marginBottom:16}}>
           <div style={{fontSize:10,color:G.gold,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:10}}>Selected Products</div>
           {selectedProds.map(p=>(
@@ -234,10 +257,7 @@ function QuoteBuilderModal({selectedProds,onRemove,onUpdateQty,onClose,onGenerat
               <div style={{width:40,height:40,borderRadius:7,overflow:"hidden",background:G.surf,border:`1px solid ${G.bdr}`,flexShrink:0}}>
                 {p.photo?<img src={p.photo} style={{width:"100%",height:"100%",objectFit:"cover"}} alt={p.name}/>:<div style={{width:"100%",height:"100%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>🏠</div>}
               </div>
-              <div style={{flex:1,minWidth:0}}>
-                <div style={{fontSize:12,fontWeight:600,color:G.cream,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{p.name}</div>
-                <div style={{fontSize:11,color:G.muted}}>{fmt(p.price)} each</div>
-              </div>
+              <div style={{flex:1,minWidth:0}}><div style={{fontSize:12,fontWeight:600,color:G.cream,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{p.name}</div><div style={{fontSize:11,color:G.muted}}>{fmt(p.price)} each</div></div>
               <div style={{display:"flex",alignItems:"center",gap:4}}>
                 <button onClick={()=>onUpdateQty(p.id,Math.max(1,(p.qty||1)-1))} style={{background:G.surf,border:`1px solid ${G.bdr}`,color:G.cream,borderRadius:5,width:26,height:26,fontSize:14,cursor:"pointer"}}>−</button>
                 <span style={{fontSize:13,fontWeight:700,minWidth:20,textAlign:"center"}}>{p.qty||1}</span>
@@ -248,13 +268,11 @@ function QuoteBuilderModal({selectedProds,onRemove,onUpdateQty,onClose,onGenerat
             </div>
           ))}
         </div>
-        {/* Client info */}
         <div className="lh-grid2" style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
           <div><label style={lbl}>Client Name *</label><input style={inp} value={clientName} onChange={e=>setClientName(e.target.value)} placeholder="e.g. Sarah Thompson"/></div>
           <div><label style={lbl}>Prepared By</label><input style={inp} value={preparedBy} onChange={e=>setPreparedBy(e.target.value)} placeholder="Your name"/></div>
         </div>
         <div style={{marginBottom:10}}><label style={lbl}>Quote Date</label><input style={inp} type="date" value={quoteDate} onChange={e=>setQuoteDate(e.target.value)}/></div>
-        {/* Discount */}
         <div style={{background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:10,padding:"12px 14px",marginBottom:10}}>
           <div style={{fontSize:10,color:G.gold,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:10}}>🏷 Discount (optional)</div>
           <div style={{display:"flex",gap:10}}>
@@ -262,9 +280,7 @@ function QuoteBuilderModal({selectedProds,onRemove,onUpdateQty,onClose,onGenerat
             <div style={{flex:1}}><label style={lbl}>Value</label><input style={inp} type="number" value={discountValue} onChange={e=>setDiscountValue(e.target.value)} placeholder={discountType==="%"?"e.g. 10":"e.g. 200"} min="0"/></div>
           </div>
         </div>
-        {/* Notes */}
         <div style={{marginBottom:16}}><label style={lbl}>Notes for Client (optional)</label><textarea style={{...inp,resize:"vertical"}} rows={2} value={notes} onChange={e=>setNotes(e.target.value)} placeholder="e.g. Customisation available. Delivery in 2–4 weeks."/></div>
-        {/* Totals */}
         <div style={{background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:10,padding:"12px 14px",marginBottom:18}}>
           <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}><span style={{fontSize:13,color:G.muted}}>Subtotal</span><span style={{fontSize:13,fontWeight:600,color:G.cream}}>{fmt(subtotal)}</span></div>
           {discAmt>0&&<div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}><span style={{fontSize:13,color:G.warn}}>Discount</span><span style={{fontSize:13,fontWeight:600,color:G.warn}}>−{fmt(discAmt)}</span></div>}
@@ -294,122 +310,75 @@ function CatalogTab({prods,onSaveQuote}){
   const [showQuoteBuilder,setShowQuoteBuilder]=useState(false);
   const [selectedIds,setSelectedIds]=useState([]);
   const [quoteItems,setQuoteItems]=useState([]);
-
   const filtered=useMemo(()=>prods.filter(p=>{
     const ms=(p.name+p.code+p.cat).toLowerCase().includes(search.toLowerCase());
     const mc=cat==="All"||p.cat===cat;
     return ms&&mc;
   }),[prods,search,cat]);
-
   function toggleSelect(prod){
-    if(selectedIds.includes(prod.id)){
-      setSelectedIds(ids=>ids.filter(i=>i!==prod.id));
-      setQuoteItems(items=>items.filter(i=>i.id!==prod.id));
-    } else {
-      setSelectedIds(ids=>[...ids,prod.id]);
-      setQuoteItems(items=>[...items,{...prod,qty:1}]);
-    }
+    if(selectedIds.includes(prod.id)){setSelectedIds(ids=>ids.filter(i=>i!==prod.id));setQuoteItems(items=>items.filter(i=>i.id!==prod.id));}
+    else{setSelectedIds(ids=>[...ids,prod.id]);setQuoteItems(items=>[...items,{...prod,qty:1}]);}
   }
   function updateQty(id,qty){setQuoteItems(items=>items.map(i=>i.id===id?{...i,qty}:i));}
   function removeFromQuote(id){setSelectedIds(ids=>ids.filter(i=>i!==id));setQuoteItems(items=>items.filter(i=>i.id!==id));}
-
   function handleGenerate(info){
-    // Generate unique ref shared between PDF and saved record
     const ref=makeRef();
     const subtotal=quoteItems.reduce((s,p)=>s+p.price*(p.qty||1),0);
     const discAmt=info.discountType==="%"?subtotal*(parseFloat(info.discountValue)||0)/100:parseFloat(info.discountValue)||0;
     const total=Math.max(0,subtotal-discAmt);
-    // Open quote PDF
     generateQuotePage(quoteItems,info,ref);
-    // Save to history
     onSaveQuote({
-      id:gid(), ref,
-      clientName:info.clientName,
-      preparedBy:info.preparedBy||"Lavishome Team",
-      quoteDate:info.quoteDate,
-      notes:info.notes||"",
-      discountType:info.discountType,
+      id:gid(),ref,clientName:info.clientName,preparedBy:info.preparedBy||"Lavishome Team",
+      quoteDate:info.quoteDate,notes:info.notes||"",discountType:info.discountType,
       discountValue:info.discountValue||"",
-      products:quoteItems.map(p=>({
-        id:p.id,code:p.code,name:p.name,cat:p.cat,
-        price:p.price,desc:p.desc||"",
-        dims:p.dims||{w:"",h:"",d:""},
-        photo:p.photo||null,stock:p.stock,qty:p.qty||1,
-      })),
-      subtotal, discAmt, total,
-      status:"Pending",
-      createdAt:Date.now(),
+      products:quoteItems.map(p=>({id:p.id,code:p.code,name:p.name,cat:p.cat,price:p.price,desc:p.desc||"",dims:p.dims||{w:"",h:"",d:""},photo:p.photo||null,stock:p.stock,qty:p.qty||1})),
+      subtotal,discAmt,total,status:"Pending",createdAt:Date.now(),
     });
-    // Clear state
-    setShowQuoteBuilder(false);
-    setSelectedIds([]);
-    setQuoteItems([]);
+    setShowQuoteBuilder(false);setSelectedIds([]);setQuoteItems([]);
   }
-
   return(
     <div>
-      {/* Controls */}
       <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap",alignItems:"center"}}>
-        <div style={{flex:1,minWidth:160,position:"relative"}}>
-          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search products…" style={{...inp,paddingLeft:34}}/>
-          <span style={{position:"absolute",left:11,top:"50%",transform:"translateY(-50%)",color:G.muted,fontSize:14,pointerEvents:"none"}}>🔍</span>
-        </div>
+        <div style={{flex:1,minWidth:160,position:"relative"}}><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search products…" style={{...inp,paddingLeft:34}}/><span style={{position:"absolute",left:11,top:"50%",transform:"translateY(-50%)",color:G.muted,fontSize:14,pointerEvents:"none"}}>🔍</span></div>
         <select value={cat} onChange={e=>setCat(e.target.value)} style={{...inp,width:"auto",minWidth:140,cursor:"pointer"}}>{ALL_CATS.map(c=><option key={c} value={c}>{c}</option>)}</select>
-        {selectedIds.length>0&&(
-          <button onClick={()=>setShowQuoteBuilder(true)} style={{background:G.goldL,border:"none",color:"#fff",borderRadius:7,padding:"9px 16px",fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
-            📋 Create Quote ({selectedIds.length})
-          </button>
-        )}
+        {selectedIds.length>0&&<button onClick={()=>setShowQuoteBuilder(true)} style={{background:G.goldL,border:"none",color:"#fff",borderRadius:7,padding:"9px 16px",fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>📋 Create Quote ({selectedIds.length})</button>}
       </div>
       <div style={{fontSize:12,color:G.muted,marginBottom:14}}>✓ Tap products to select for a quote. <strong style={{color:G.cream}}>{filtered.length}</strong> shown.</div>
-
-      {/* Grid */}
-      {filtered.length===0
-        ?<div style={{textAlign:"center",padding:50,color:G.muted}}><div style={{fontSize:36,marginBottom:10}}>📦</div><div>No products found</div></div>
-        :<div className="lh-cgrid" style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:16}}>
-          {filtered.map(p=>{
-            const isSel=selectedIds.includes(p.id);
-            const isLow=p.stock<=p.minStock&&p.stock>0,isOut=p.stock===0;
-            const d=p.dims,hd=d&&(d.w||d.h||d.d);
-            return(
-              <div key={p.id} style={{background:G.surf,border:`2px solid ${isSel?G.goldL:G.bdr}`,borderRadius:14,overflow:"hidden",boxShadow:isSel?`0 4px 16px ${G.goldL}33`:"0 2px 8px rgba(0,0,0,0.07)",transition:"all 0.14s",position:"relative"}}>
-                <div onClick={()=>toggleSelect(p)} style={{position:"absolute",top:12,left:12,zIndex:10,width:28,height:28,borderRadius:7,background:isSel?G.goldL:"rgba(255,255,255,0.92)",border:`2px solid ${isSel?G.goldL:G.bdr}`,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",boxShadow:"0 1px 4px rgba(0,0,0,0.1)"}}>
-                  {isSel&&<span style={{color:"#fff",fontSize:14,fontWeight:700}}>✓</span>}
+      {filtered.length===0?<div style={{textAlign:"center",padding:50,color:G.muted}}><div style={{fontSize:36,marginBottom:10}}>📦</div><div>No products found</div></div>:
+      <div className="lh-cgrid" style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:16}}>
+        {filtered.map(p=>{
+          const isSel=selectedIds.includes(p.id);
+          const isLow=p.stock<=p.minStock&&p.stock>0,isOut=p.stock===0;
+          const d=p.dims,hd=d&&(d.w||d.h||d.d);
+          return(
+            <div key={p.id} style={{background:G.surf,border:`2px solid ${isSel?G.goldL:G.bdr}`,borderRadius:14,overflow:"hidden",boxShadow:isSel?`0 4px 16px ${G.goldL}33`:"0 2px 8px rgba(0,0,0,0.07)",transition:"all 0.14s",position:"relative"}}>
+              <div onClick={()=>toggleSelect(p)} style={{position:"absolute",top:12,left:12,zIndex:10,width:28,height:28,borderRadius:7,background:isSel?G.goldL:"rgba(255,255,255,0.92)",border:`2px solid ${isSel?G.goldL:G.bdr}`,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",boxShadow:"0 1px 4px rgba(0,0,0,0.1)"}}>
+                {isSel&&<span style={{color:"#fff",fontSize:14,fontWeight:700}}>✓</span>}
+              </div>
+              <div onClick={()=>setDetailProd(p)} style={{height:isMobile?150:170,background:G.surf2,overflow:"hidden",position:"relative",cursor:"pointer"}}>
+                {p.photo?<img src={p.photo} style={{width:"100%",height:"100%",objectFit:"cover"}} alt={p.name}/>:<div style={{width:"100%",height:"100%",display:"flex",alignItems:"center",justifyContent:"center",color:G.bdr,fontSize:44}}>🏠</div>}
+                <div style={{position:"absolute",top:10,right:10,background:"rgba(255,255,255,0.92)",border:`1px solid ${G.bdr}`,borderRadius:5,padding:"2px 8px",fontSize:10,color:G.gold,fontWeight:700,fontFamily:"monospace"}}>{p.code}</div>
+                {isOut&&<div style={{position:"absolute",bottom:10,left:10,background:G.danger,borderRadius:5,padding:"2px 8px",fontSize:9,color:"#fff",fontWeight:700}}>OUT OF STOCK</div>}
+                {isLow&&!isOut&&<div style={{position:"absolute",bottom:10,left:10,background:G.warn,borderRadius:5,padding:"2px 8px",fontSize:9,color:"#fff",fontWeight:700}}>LOW STOCK</div>}
+              </div>
+              <div style={{padding:isMobile?12:14}}>
+                <div style={{fontSize:9,color:G.gold,fontWeight:700,letterSpacing:"0.14em",textTransform:"uppercase",marginBottom:3}}>{p.cat}</div>
+                <div style={{fontSize:isMobile?13:14,fontWeight:600,color:G.cream,fontFamily:"'Playfair Display',serif",lineHeight:1.3,marginBottom:4}}>{p.name}</div>
+                {p.desc&&<div style={{fontSize:11,color:G.muted,marginBottom:8,lineHeight:1.5}}>{p.desc}</div>}
+                {hd&&<div style={{display:"inline-flex",alignItems:"center",gap:5,background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:5,padding:"2px 8px",marginBottom:10}}><span style={{fontSize:9,color:G.muted,textTransform:"uppercase",letterSpacing:"0.1em",fontWeight:700}}>W×H×D</span><span style={{fontSize:11,color:G.gold,fontFamily:"monospace",fontWeight:600}}>{d.w||"–"}×{d.h||"–"}×{d.d||"–"} cm</span></div>}
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+                  <div style={{fontSize:isMobile?16:18,fontWeight:700,color:G.goldL,fontFamily:"'Playfair Display',serif"}}>${p.price.toLocaleString("en-CA",{minimumFractionDigits:2})}</div>
+                  <span style={{padding:"3px 9px",borderRadius:999,fontSize:9,fontWeight:700,textTransform:"uppercase",background:(isOut?G.danger:isLow?G.warn:G.ok)+"18",color:isOut?G.danger:isLow?G.warn:G.ok,border:`1px solid ${(isOut?G.danger:isLow?G.warn:G.ok)}44`}}>{isOut?"Out of Stock":isLow?`Only ${p.stock} left`:`${p.stock} available`}</span>
                 </div>
-                <div onClick={()=>setDetailProd(p)} style={{height:isMobile?150:170,background:G.surf2,overflow:"hidden",position:"relative",cursor:"pointer"}}>
-                  {p.photo?<img src={p.photo} style={{width:"100%",height:"100%",objectFit:"cover"}} alt={p.name}/>:<div style={{width:"100%",height:"100%",display:"flex",alignItems:"center",justifyContent:"center",color:G.bdr,fontSize:44}}>🏠</div>}
-                  <div style={{position:"absolute",top:10,right:10,background:"rgba(255,255,255,0.92)",border:`1px solid ${G.bdr}`,borderRadius:5,padding:"2px 8px",fontSize:10,color:G.gold,fontWeight:700,fontFamily:"monospace"}}>{p.code}</div>
-                  {isOut&&<div style={{position:"absolute",bottom:10,left:10,background:G.danger,borderRadius:5,padding:"2px 8px",fontSize:9,color:"#fff",fontWeight:700}}>OUT OF STOCK</div>}
-                  {isLow&&!isOut&&<div style={{position:"absolute",bottom:10,left:10,background:G.warn,borderRadius:5,padding:"2px 8px",fontSize:9,color:"#fff",fontWeight:700}}>LOW STOCK</div>}
-                </div>
-                <div style={{padding:isMobile?12:14}}>
-                  <div style={{fontSize:9,color:G.gold,fontWeight:700,letterSpacing:"0.14em",textTransform:"uppercase",marginBottom:3}}>{p.cat}</div>
-                  <div style={{fontSize:isMobile?13:14,fontWeight:600,color:G.cream,fontFamily:"'Playfair Display',serif",lineHeight:1.3,marginBottom:4}}>{p.name}</div>
-                  {p.desc&&<div style={{fontSize:11,color:G.muted,marginBottom:8,lineHeight:1.5}}>{p.desc}</div>}
-                  {hd&&<div style={{display:"inline-flex",alignItems:"center",gap:5,background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:5,padding:"2px 8px",marginBottom:10}}>
-                    <span style={{fontSize:9,color:G.muted,textTransform:"uppercase",letterSpacing:"0.1em",fontWeight:700}}>W×H×D</span>
-                    <span style={{fontSize:11,color:G.gold,fontFamily:"monospace",fontWeight:600}}>{d.w||"–"}×{d.h||"–"}×{d.d||"–"} cm</span>
-                  </div>}
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
-                    <div style={{fontSize:isMobile?16:18,fontWeight:700,color:G.goldL,fontFamily:"'Playfair Display',serif"}}>${p.price.toLocaleString("en-CA",{minimumFractionDigits:2})}</div>
-                    <span style={{padding:"3px 9px",borderRadius:999,fontSize:9,fontWeight:700,textTransform:"uppercase",background:(isOut?G.danger:isLow?G.warn:G.ok)+"18",color:isOut?G.danger:isLow?G.warn:G.ok,border:`1px solid ${(isOut?G.danger:isLow?G.warn:G.ok)}44`}}>
-                      {isOut?"Out of Stock":isLow?`Only ${p.stock} left`:`${p.stock} available`}
-                    </span>
-                  </div>
-                  <div style={{display:"flex",gap:8}}>
-                    <button onClick={()=>setDetailProd(p)} style={{flex:1,background:"#fff",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:7,padding:"9px 6px",fontSize:isMobile?12:11,fontWeight:600,cursor:"pointer"}}>View Details</button>
-                    <button onClick={()=>toggleSelect(p)} style={{flex:1,background:isSel?G.ok:G.goldL,border:"none",color:"#fff",borderRadius:7,padding:"9px 6px",fontSize:isMobile?12:11,fontWeight:700,cursor:"pointer"}}>
-                      {isSel?"✓ Selected":"+ Add to Quote"}
-                    </button>
-                  </div>
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={()=>setDetailProd(p)} style={{flex:1,background:"#fff",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:7,padding:"9px 6px",fontSize:isMobile?12:11,fontWeight:600,cursor:"pointer"}}>View Details</button>
+                  <button onClick={()=>toggleSelect(p)} style={{flex:1,background:isSel?G.ok:G.goldL,border:"none",color:"#fff",borderRadius:7,padding:"9px 6px",fontSize:isMobile?12:11,fontWeight:700,cursor:"pointer"}}>{isSel?"✓ Selected":"+ Add to Quote"}</button>
                 </div>
               </div>
-            );
-          })}
-        </div>
-      }
-
-      {/* Sticky bar */}
+            </div>
+          );
+        })}
+      </div>}
       {selectedIds.length>0&&(
         <div className="lh-sticky" style={{position:"fixed",bottom:20,left:"50%",transform:"translateX(-50%)",background:G.goldL,borderRadius:999,padding:"13px 24px",boxShadow:"0 8px 32px rgba(106,78,16,0.35)",display:"flex",alignItems:"center",gap:14,zIndex:99,whiteSpace:"nowrap"}}>
           <span style={{color:"#fff",fontSize:13,fontWeight:600}}>{selectedIds.length} product{selectedIds.length>1?"s":""} selected</span>
@@ -417,7 +386,6 @@ function CatalogTab({prods,onSaveQuote}){
           <button onClick={()=>{setSelectedIds([]);setQuoteItems([]);}} style={{background:"none",border:"1px solid rgba(255,255,255,0.4)",color:"#fff",borderRadius:999,padding:"8px 12px",fontSize:12,cursor:"pointer"}}>Clear</button>
         </div>
       )}
-
       {detailProd&&<ProductDetailModal product={detailProd} onClose={()=>setDetailProd(null)} onSelectForQuote={toggleSelect} isSelected={selectedIds.includes(detailProd.id)}/>}
       {showQuoteBuilder&&<QuoteBuilderModal selectedProds={quoteItems} onRemove={removeFromQuote} onUpdateQty={updateQty} onClose={()=>setShowQuoteBuilder(false)} onGenerate={handleGenerate}/>}
     </div>
@@ -432,54 +400,26 @@ function QuoteHistoryTab({quotes,onUpdateStatus,onDelete}){
   const [search,setSearch]=useState("");
   const [statusF,setStatusF]=useState("All");
   const [delConfirm,setDelConfirm]=useState(null);
-
-  const filtered=useMemo(()=>
-    [...quotes]
-      .sort((a,b)=>b.createdAt-a.createdAt)
-      .filter(q=>{
-        const ms=(q.clientName+q.ref+(q.preparedBy||"")).toLowerCase().includes(search.toLowerCase());
-        const mf=statusF==="All"||q.status===statusF;
-        return ms&&mf;
-      })
-  ,[quotes,search,statusF]);
-
-  // Summary stats
+  const filtered=useMemo(()=>[...quotes].sort((a,b)=>b.createdAt-a.createdAt).filter(q=>{
+    const ms=(q.clientName+q.ref+(q.preparedBy||"")).toLowerCase().includes(search.toLowerCase());
+    const mf=statusF==="All"||q.status===statusF;
+    return ms&&mf;
+  }),[quotes,search,statusF]);
   const totalAll=quotes.length;
-  const valPending=quotes.filter(q=>q.status==="Pending").reduce((s,q)=>s+q.total,0);
   const valAccepted=quotes.filter(q=>q.status==="Accepted").reduce((s,q)=>s+q.total,0);
   const countPending=quotes.filter(q=>q.status==="Pending").length;
   const countAccepted=quotes.filter(q=>q.status==="Accepted").length;
-
-  function reopen(q){
-    generateQuotePage(q.products,{
-      clientName:q.clientName,preparedBy:q.preparedBy,
-      notes:q.notes,discountType:q.discountType,
-      discountValue:q.discountValue,quoteDate:q.quoteDate,
-    },q.ref);
-  }
-
+  function reopen(q){generateQuotePage(q.products,{clientName:q.clientName,preparedBy:q.preparedBy,notes:q.notes,discountType:q.discountType,discountValue:q.discountValue,quoteDate:q.quoteDate},q.ref);}
   function exportCSV(){
     const h=["Ref","Client","Prepared By","Date","Products","Subtotal","Discount","Total","Status","Notes"];
-    const rows=filtered.map(q=>[
-      q.ref, q.clientName, q.preparedBy||"", q.quoteDate,
-      q.products.map(p=>`${p.name} ×${p.qty}`).join(" | "),
-      q.subtotal.toFixed(2), q.discAmt.toFixed(2), q.total.toFixed(2),
-      q.status, q.notes||"",
-    ]);
+    const rows=filtered.map(q=>[q.ref,q.clientName,q.preparedBy||"",q.quoteDate,q.products.map(p=>`${p.name} ×${p.qty}`).join(" | "),q.subtotal.toFixed(2),q.discAmt.toFixed(2),q.total.toFixed(2),q.status,q.notes||""]);
     const csv=[h,...rows].map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(",")).join("\n");
     const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));a.download="lavishome_quotes.csv";a.click();
   }
-
   return(
     <div>
-      {/* Stats */}
       <div className="lh-stats" style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:22}}>
-        {[
-          {l:"Total Quotes",v:totalAll,         icon:"📋",color:G.goldL},
-          {l:"Pending",     v:countPending,      icon:"⏳",color:G.warn},
-          {l:"Accepted",    v:countAccepted,     icon:"✅",color:G.ok},
-          {l:"Accepted Value",v:"$"+valAccepted.toLocaleString("en-CA",{minimumFractionDigits:0}),icon:"💰",color:G.ok},
-        ].map(s=>(
+        {[{l:"Total Quotes",v:totalAll,icon:"📋",color:G.goldL},{l:"Pending",v:countPending,icon:"⏳",color:G.warn},{l:"Accepted",v:countAccepted,icon:"✅",color:G.ok},{l:"Accepted Value",v:"$"+valAccepted.toLocaleString("en-CA",{minimumFractionDigits:0}),icon:"💰",color:G.ok}].map(s=>(
           <div key={s.l} style={{background:G.surf,border:`1px solid ${G.bdr}`,borderRadius:12,padding:isMobile?"12px 14px":"16px 18px",boxShadow:"0 1px 4px rgba(0,0,0,0.06)"}}>
             <div style={{fontSize:isMobile?16:20,marginBottom:3}}>{s.icon}</div>
             <div style={{fontSize:isMobile?15:18,fontWeight:700,color:s.color,fontFamily:"'Playfair Display',serif"}}>{s.v}</div>
@@ -487,43 +427,19 @@ function QuoteHistoryTab({quotes,onUpdateStatus,onDelete}){
           </div>
         ))}
       </div>
-
-      {/* Controls */}
       <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap",alignItems:"center"}}>
-        <div style={{flex:1,minWidth:160,position:"relative"}}>
-          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search client or quote ref…" style={{...inp,paddingLeft:34}}/>
-          <span style={{position:"absolute",left:11,top:"50%",transform:"translateY(-50%)",color:G.muted,fontSize:14,pointerEvents:"none"}}>🔍</span>
-        </div>
-        <select value={statusF} onChange={e=>setStatusF(e.target.value)} style={{...inp,width:"auto",minWidth:130,cursor:"pointer"}}>
-          <option value="All">All Statuses</option>
-          <option value="Pending">⏳ Pending</option>
-          <option value="Accepted">✅ Accepted</option>
-          <option value="Declined">❌ Declined</option>
-        </select>
+        <div style={{flex:1,minWidth:160,position:"relative"}}><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search client or quote ref…" style={{...inp,paddingLeft:34}}/><span style={{position:"absolute",left:11,top:"50%",transform:"translateY(-50%)",color:G.muted,fontSize:14,pointerEvents:"none"}}>🔍</span></div>
+        <select value={statusF} onChange={e=>setStatusF(e.target.value)} style={{...inp,width:"auto",minWidth:130,cursor:"pointer"}}><option value="All">All Statuses</option><option value="Pending">⏳ Pending</option><option value="Accepted">✅ Accepted</option><option value="Declined">❌ Declined</option></select>
         <button onClick={exportCSV} style={{background:"#fff",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:7,padding:"9px 14px",fontSize:12,fontWeight:600,cursor:"pointer"}}>⬇ CSV</button>
       </div>
-
       <div style={{fontSize:12,color:G.muted,marginBottom:14}}>Showing <strong style={{color:G.cream}}>{filtered.length}</strong> of {quotes.length} quotes</div>
-
-      {/* Empty state */}
-      {filtered.length===0&&(
-        <div style={{textAlign:"center",padding:60,color:G.muted}}>
-          <div style={{fontSize:40,marginBottom:12}}>📋</div>
-          <div style={{fontSize:16,fontWeight:600,color:G.cream,marginBottom:6}}>No quotes yet</div>
-          <div style={{fontSize:13}}>Generate a quote from the Catalog &amp; Quotes tab — it will appear here automatically.</div>
-        </div>
-      )}
-
-      {/* Quote cards */}
+      {filtered.length===0&&<div style={{textAlign:"center",padding:60,color:G.muted}}><div style={{fontSize:40,marginBottom:12}}>📋</div><div style={{fontSize:16,fontWeight:600,color:G.cream,marginBottom:6}}>No quotes yet</div><div style={{fontSize:13}}>Generate a quote from the Catalog tab — it will appear here automatically.</div></div>}
       <div style={{display:"flex",flexDirection:"column",gap:14}}>
         {filtered.map(q=>{
           const sm=STATUS_META[q.status]||STATUS_META.Pending;
-          const hasDiscount=q.discAmt>0;
           return(
             <div key={q.id} style={{background:G.surf,border:`1px solid ${G.bdr}`,borderRadius:14,padding:isMobile?"14px 16px":"18px 22px",boxShadow:"0 1px 6px rgba(0,0,0,0.06)"}}>
-              {/* Top row */}
               <div className="lh-q-row" style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:16,marginBottom:14}}>
-                {/* Left — client info */}
                 <div style={{flex:1,minWidth:0}}>
                   <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4,flexWrap:"wrap"}}>
                     <div style={{fontSize:isMobile?15:17,fontWeight:700,color:G.cream,fontFamily:"'Playfair Display',serif"}}>{q.clientName}</div>
@@ -533,17 +449,14 @@ function QuoteHistoryTab({quotes,onUpdateStatus,onDelete}){
                     <div style={{fontSize:11,color:G.muted}}><span style={{fontFamily:"monospace",fontWeight:700,color:G.gold}}>{q.ref}</span></div>
                     <div style={{fontSize:11,color:G.muted}}>📅 {fmtDate(q.quoteDate)}</div>
                     {q.preparedBy&&<div style={{fontSize:11,color:G.muted}}>👤 {q.preparedBy}</div>}
-                    <div style={{fontSize:11,color:G.muted}}>🕐 Saved {fmtTs(q.createdAt)}</div>
+                    <div style={{fontSize:11,color:G.muted}}>🕐 {fmtTs(q.createdAt)}</div>
                   </div>
                 </div>
-                {/* Right — total */}
                 <div style={{textAlign:"right",flexShrink:0}}>
                   <div style={{fontSize:isMobile?18:22,fontWeight:700,color:G.goldL,fontFamily:"'Playfair Display',serif"}}>{fmt(q.total)}</div>
-                  {hasDiscount&&<div style={{fontSize:11,color:G.muted,marginTop:2}}>after {q.discountType==="%"?q.discountValue+"%":"$"+q.discountValue} discount</div>}
+                  {q.discAmt>0&&<div style={{fontSize:11,color:G.muted,marginTop:2}}>after {q.discountType==="%"?q.discountValue+"%":"$"+q.discountValue} discount</div>}
                 </div>
               </div>
-
-              {/* Products summary */}
               <div style={{background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:10,padding:"10px 14px",marginBottom:14}}>
                 <div style={{fontSize:9,color:G.muted,textTransform:"uppercase",letterSpacing:"0.1em",fontWeight:700,marginBottom:8}}>Products</div>
                 <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
@@ -558,67 +471,51 @@ function QuoteHistoryTab({quotes,onUpdateStatus,onDelete}){
                 </div>
                 {q.notes&&<div style={{fontSize:11,color:G.muted,marginTop:8,paddingTop:8,borderTop:`1px solid ${G.bdr}`}}><span style={{fontWeight:600}}>Note: </span>{q.notes}</div>}
               </div>
-
-              {/* Action buttons */}
               <div className="lh-q-actions" style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-                {/* Re-open quote */}
-                <button onClick={()=>reopen(q)} style={{background:G.goldL,border:"none",color:"#fff",borderRadius:7,padding:"8px 16px",fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
-                  🖨 Re-open Quote
-                </button>
-                {/* Status buttons — only show relevant ones */}
-                {q.status!=="Accepted"&&(
-                  <button onClick={()=>onUpdateStatus(q.id,"Accepted")} style={{background:G.ok+"18",border:`1px solid ${G.ok}44`,color:G.ok,borderRadius:7,padding:"8px 14px",fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>
-                    ✅ Mark Accepted
-                  </button>
-                )}
-                {q.status!=="Declined"&&(
-                  <button onClick={()=>onUpdateStatus(q.id,"Declined")} style={{background:G.muted+"18",border:`1px solid ${G.muted}44`,color:G.muted,borderRadius:7,padding:"8px 14px",fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>
-                    ❌ Mark Declined
-                  </button>
-                )}
-                {q.status!=="Pending"&&(
-                  <button onClick={()=>onUpdateStatus(q.id,"Pending")} style={{background:G.warn+"18",border:`1px solid ${G.warn}44`,color:G.warn,borderRadius:7,padding:"8px 14px",fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>
-                    ⏳ Mark Pending
-                  </button>
-                )}
-                {/* Delete — far right, subtle */}
-                <button onClick={()=>setDelConfirm(q.id)} style={{marginLeft:"auto",background:G.danger+"10",border:`1px solid ${G.danger}33`,color:G.danger,borderRadius:7,padding:"8px 12px",fontSize:11,fontWeight:600,cursor:"pointer"}}>
-                  Delete
-                </button>
+                <button onClick={()=>reopen(q)} style={{background:G.goldL,border:"none",color:"#fff",borderRadius:7,padding:"8px 16px",fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>🖨 Re-open Quote</button>
+                {q.status!=="Accepted"&&<button onClick={()=>onUpdateStatus(q.id,"Accepted")} style={{background:G.ok+"18",border:`1px solid ${G.ok}44`,color:G.ok,borderRadius:7,padding:"8px 14px",fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>✅ Mark Accepted</button>}
+                {q.status!=="Declined"&&<button onClick={()=>onUpdateStatus(q.id,"Declined")} style={{background:G.muted+"18",border:`1px solid ${G.muted}44`,color:G.muted,borderRadius:7,padding:"8px 14px",fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>❌ Mark Declined</button>}
+                {q.status!=="Pending"&&<button onClick={()=>onUpdateStatus(q.id,"Pending")} style={{background:G.warn+"18",border:`1px solid ${G.warn}44`,color:G.warn,borderRadius:7,padding:"8px 14px",fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>⏳ Mark Pending</button>}
+                <button onClick={()=>setDelConfirm(q.id)} style={{marginLeft:"auto",background:G.danger+"10",border:`1px solid ${G.danger}33`,color:G.danger,borderRadius:7,padding:"8px 12px",fontSize:11,fontWeight:600,cursor:"pointer"}}>Delete</button>
               </div>
             </div>
           );
         })}
       </div>
-
-      {/* Delete confirm modal */}
-      {delConfirm&&<ModalWrap onClose={()=>setDelConfirm(null)} maxW={360}>
-        <div style={{padding:28,textAlign:"center"}}>
-          <div style={{fontSize:36,marginBottom:12}}>🗑️</div>
-          <h3 style={{color:G.cream,fontFamily:"'Playfair Display',serif",marginBottom:8,fontSize:18}}>Delete Quote?</h3>
-          <p style={{color:G.muted,fontSize:13,marginBottom:22}}>This will permanently remove the quote from your history.</p>
-          <div style={{display:"flex",gap:10,justifyContent:"center"}}>
-            <button onClick={()=>setDelConfirm(null)} style={{background:"#fff",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:7,padding:"10px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>Cancel</button>
-            <button onClick={()=>{onDelete(delConfirm);setDelConfirm(null);}} style={{background:G.danger,border:"none",color:"#fff",borderRadius:7,padding:"10px 18px",fontSize:13,fontWeight:700,cursor:"pointer"}}>Delete</button>
-          </div>
-        </div>
-      </ModalWrap>}
+      {delConfirm&&<ModalWrap onClose={()=>setDelConfirm(null)} maxW={360}><div style={{padding:28,textAlign:"center"}}><div style={{fontSize:36,marginBottom:12}}>🗑️</div><h3 style={{color:G.cream,fontFamily:"'Playfair Display',serif",marginBottom:8,fontSize:18}}>Delete Quote?</h3><p style={{color:G.muted,fontSize:13,marginBottom:22}}>This will permanently remove the quote from your history.</p><div style={{display:"flex",gap:10,justifyContent:"center"}}><button onClick={()=>setDelConfirm(null)} style={{background:"#fff",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:7,padding:"10px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>Cancel</button><button onClick={()=>{onDelete(delConfirm);setDelConfirm(null);}} style={{background:G.danger,border:"none",color:"#fff",borderRadius:7,padding:"10px 18px",fontSize:13,fontWeight:700,cursor:"pointer"}}>Delete</button></div></div></ModalWrap>}
     </div>
   );
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-//  INVENTORY MODAL
+//  INVENTORY MODAL  (with photo compression)
 // ══════════════════════════════════════════════════════════════════════════
 function InvModal({initial,onSave,onClose}){
   const isMobile=useIsMobile();
   const isEdit=!!initial;
   const [f,setF]=useState(initial||{code:"LH-"+Math.random().toString(36).substr(2,4).toUpperCase(),name:"",cat:"Sofas",price:"",costPrice:"",stock:"",minStock:10,desc:"",dims:{w:"",h:"",d:""},photo:null});
+  const [uploading,setUploading]=useState(false);
   const fRef=useRef();
   const set=k=>v=>setF(x=>({...x,[k]:v}));
   const setDim=k=>v=>setF(x=>({...x,dims:{...x.dims,[k]:v}}));
-  function handlePhoto(e){const file=e.target.files[0];if(!file)return;if(file.size>600000){alert("Max 600KB");return;}const r=new FileReader();r.onload=ev=>setF(x=>({...x,photo:ev.target.result}));r.readAsDataURL(file);}
-  function save(){if(!f.name.trim()||!f.code.trim())return alert("Name and code required.");onSave({...f,price:parseFloat(f.price)||0,costPrice:parseFloat(f.costPrice)||0,stock:parseInt(f.stock)||0,minStock:parseInt(f.minStock)||5,id:initial?.id||gid(),ts:initial?.ts||Date.now()});}
+
+  async function handlePhoto(e){
+    const file=e.target.files[0];
+    if(!file)return;
+    setUploading(true);
+    const r=new FileReader();
+    r.onload=async ev=>{
+      const compressed=await compressPhoto(ev.target.result);
+      setF(x=>({...x,photo:compressed}));
+      setUploading(false);
+    };
+    r.readAsDataURL(file);
+  }
+
+  function save(){
+    if(!f.name.trim()||!f.code.trim())return alert("Name and code required.");
+    onSave({...f,price:parseFloat(f.price)||0,costPrice:parseFloat(f.costPrice)||0,stock:parseInt(f.stock)||0,minStock:parseInt(f.minStock)||5,id:initial?.id||gid(),ts:initial?.ts||Date.now()});
+  }
   const p=parseFloat(f.price)||0,c=parseFloat(f.costPrice)||0;
   const mg=p>0&&c>0?((p-c)/p*100).toFixed(1):null;
   const profitUnit=p>0&&c>0?p-c:null;
@@ -632,11 +529,13 @@ function InvModal({initial,onSave,onClose}){
         </div>
         <div style={{marginBottom:14}}>
           <label style={lbl}>Product Photo</label>
-          <div onClick={()=>fRef.current.click()} style={{border:`2px dashed ${G.bdr}`,borderRadius:8,height:90,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",overflow:"hidden",background:G.surf2}}>
-            {f.photo?<img src={f.photo} style={{width:"100%",height:"100%",objectFit:"cover"}} alt="product"/>:<div style={{textAlign:"center",color:G.muted}}><div style={{fontSize:22,marginBottom:3}}>📷</div><div style={{fontSize:11}}>Tap to upload (max 600KB)</div></div>}
+          <div onClick={()=>!uploading&&fRef.current.click()} style={{border:`2px dashed ${G.bdr}`,borderRadius:8,height:90,cursor:uploading?"wait":"pointer",display:"flex",alignItems:"center",justifyContent:"center",overflow:"hidden",background:G.surf2}}>
+            {uploading?<div style={{textAlign:"center",color:G.muted}}><div style={{fontSize:18,marginBottom:3}}>⏳</div><div style={{fontSize:11}}>Compressing photo…</div></div>:
+             f.photo?<img src={f.photo} style={{width:"100%",height:"100%",objectFit:"cover"}} alt="product"/>:
+             <div style={{textAlign:"center",color:G.muted}}><div style={{fontSize:22,marginBottom:3}}>📷</div><div style={{fontSize:11}}>Tap to upload — auto compressed</div></div>}
           </div>
           <input ref={fRef} type="file" accept="image/*" onChange={handlePhoto} style={{display:"none"}} capture="environment"/>
-          {f.photo&&<button onClick={()=>setF(x=>({...x,photo:null}))} style={{marginTop:6,background:"transparent",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:5,padding:"3px 10px",fontSize:11,cursor:"pointer"}}>Remove photo</button>}
+          {f.photo&&!uploading&&<button onClick={()=>setF(x=>({...x,photo:null}))} style={{marginTop:6,background:"transparent",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:5,padding:"3px 10px",fontSize:11,cursor:"pointer"}}>Remove photo</button>}
         </div>
         <div className="lh-grid2" style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
           <div><label style={lbl}>Product Code</label><input style={inp} value={f.code} onChange={e=>set("code")(e.target.value)}/></div>
@@ -671,7 +570,7 @@ function InvModal({initial,onSave,onClose}){
         <div style={{marginBottom:18}}><label style={lbl}>Description</label><input style={inp} value={f.desc} onChange={e=>set("desc")(e.target.value)} placeholder="Short description…"/></div>
         <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
           <button onClick={onClose} style={{background:"transparent",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:7,padding:"10px 16px",fontSize:13,fontWeight:600,cursor:"pointer"}}>Cancel</button>
-          <button onClick={save} style={{background:G.goldL,border:"none",color:"#fff",borderRadius:7,padding:"10px 20px",fontSize:13,fontWeight:700,cursor:"pointer"}}>{isEdit?"Save Changes":"Add Product"}</button>
+          <button onClick={save} disabled={uploading} style={{background:uploading?G.muted:G.goldL,border:"none",color:"#fff",borderRadius:7,padding:"10px 20px",fontSize:13,fontWeight:700,cursor:uploading?"not-allowed":"pointer"}}>{uploading?"Uploading…":isEdit?"Save Changes":"Add Product"}</button>
         </div>
       </div>
     </ModalWrap>
@@ -681,7 +580,7 @@ function InvModal({initial,onSave,onClose}){
 // ══════════════════════════════════════════════════════════════════════════
 //  INVENTORY TAB
 // ══════════════════════════════════════════════════════════════════════════
-function InventoryTab({prods,persist}){
+function InventoryTab({prods,onSaveProduct,onDeleteProduct,onAdjustStock}){
   const isMobile=useIsMobile();
   const [search,setSearch]=useState("");
   const [cat,setCat]=useState("All");
@@ -690,22 +589,29 @@ function InventoryTab({prods,persist}){
   const [editP,setEditP]=useState(null);
   const [delId,setDelId]=useState(null);
   const [vw,setVw]=useState("grid");
-  function saveProduct(p){const u=prods.find(x=>x.id===p.id)?prods.map(x=>x.id===p.id?p:x):[...prods,p];persist(u);setModal(null);setEditP(null);}
-  function del(){persist(prods.filter(p=>p.id!==delId));setModal(null);setDelId(null);}
-  function adj(id,d){persist(prods.map(p=>p.id===id?{...p,stock:Math.max(0,p.stock+d)}:p));}
+
   const filtered=useMemo(()=>prods.filter(p=>{
     const ms=(p.name+p.code).toLowerCase().includes(search.toLowerCase());
     const mc=cat==="All"||p.cat===cat;
     const mst=stockF==="All"||(stockF==="Low"&&p.stock<=p.minStock&&p.stock>0)||(stockF==="Out"&&p.stock===0)||(stockF==="OK"&&p.stock>p.minStock);
     return ms&&mc&&mst;
   }),[prods,search,cat,stockF]);
+
   const totalSellVal=prods.reduce((s,p)=>s+p.price*p.stock,0);
   const totalPotProfit=prods.reduce((s,p)=>s+(p.price-(p.costPrice||0))*p.stock,0);
   const lowN=prods.filter(p=>p.stock<=p.minStock&&p.stock>0).length;
   const outN=prods.filter(p=>p.stock===0).length;
-  function exportCSV(){const h=["Code","Name","Category","Selling Price","Cost Price","Margin %","Profit/Unit","Stock","Min Stock","Status","W","H","D","Description"];const rows=filtered.map(p=>{const mg=calcMargin(p.price,p.costPrice);return[p.code,p.name,p.cat,p.price.toFixed(2),(p.costPrice||0).toFixed(2),mg!==null?mg+"%":"",mg!==null?(p.price-p.costPrice).toFixed(2):"",p.stock,p.minStock,p.stock===0?"Out":p.stock<=p.minStock?"Low":"OK",p.dims?.w||"",p.dims?.h||"",p.dims?.d||"",p.desc||""];});const csv=[h,...rows].map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(",")).join("\n");const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));a.download="lavishome_inventory.csv";a.click();}
+
+  function exportCSV(){
+    const h=["Code","Name","Category","Selling Price","Cost Price","Margin %","Profit/Unit","Stock","Min Stock","Status","W","H","D","Description"];
+    const rows=filtered.map(p=>{const mg=calcMargin(p.price,p.costPrice);return[p.code,p.name,p.cat,p.price.toFixed(2),(p.costPrice||0).toFixed(2),mg!==null?mg+"%":"",mg!==null?(p.price-p.costPrice).toFixed(2):"",p.stock,p.minStock,p.stock===0?"Out":p.stock<=p.minStock?"Low":"OK",p.dims?.w||"",p.dims?.h||"",p.dims?.d||"",p.desc||""];});
+    const csv=[h,...rows].map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(",")).join("\n");
+    const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));a.download="lavishome_inventory.csv";a.click();
+  }
+
   return(
     <div>
+      {/* Stats */}
       <div className="lh-stats" style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:20}}>
         {[{l:"Products",v:prods.length,icon:"📦",a:false,s:false},{l:"Sell Value",v:"$"+totalSellVal.toLocaleString("en-CA",{minimumFractionDigits:0}),icon:"💰",a:false,s:false},{l:"Pot. Profit",v:"$"+totalPotProfit.toLocaleString("en-CA",{minimumFractionDigits:0}),icon:"📈",a:false,s:true},{l:"Low / Out",v:`${lowN} / ${outN}`,icon:"⚠️",a:lowN>0||outN>0,s:false}].map(s=>(
           <div key={s.l} style={{background:G.surf,border:`1px solid ${s.a?G.warn+"88":s.s?G.ok+"44":G.bdr}`,borderRadius:12,padding:isMobile?"12px 14px":"16px 18px",boxShadow:"0 1px 4px rgba(0,0,0,0.06)"}}>
@@ -715,6 +621,7 @@ function InventoryTab({prods,persist}){
           </div>
         ))}
       </div>
+      {/* Controls */}
       <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap",alignItems:"center"}}>
         <div style={{flex:1,minWidth:160,position:"relative"}}><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search name or code…" style={{...inp,paddingLeft:34}}/><span style={{position:"absolute",left:11,top:"50%",transform:"translateY(-50%)",color:G.muted,fontSize:14,pointerEvents:"none"}}>🔍</span></div>
         <select value={cat} onChange={e=>setCat(e.target.value)} style={{...inp,width:"auto",minWidth:isMobile?"100%":140,cursor:"pointer"}}>{ALL_CATS.map(c=><option key={c} value={c}>{c}</option>)}</select>
@@ -726,51 +633,58 @@ function InventoryTab({prods,persist}){
         </div>
       </div>
       <div style={{fontSize:12,color:G.muted,marginBottom:12}}>Showing <strong style={{color:G.cream}}>{filtered.length}</strong> of {prods.length} products</div>
+
+      {/* Grid */}
       {vw==="grid"&&(filtered.length===0?<div style={{textAlign:"center",padding:50,color:G.muted}}><div style={{fontSize:36,marginBottom:10}}>📦</div><div>No products found</div></div>:
       <div className="lh-pgrid" style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(240px,1fr))",gap:16}}>
         {filtered.map(p=>{
           const isLow=p.stock<=p.minStock&&p.stock>0,isOut=p.stock===0,d=p.dims,hd=d&&(d.w||d.h||d.d);
           const mg=calcMargin(p.price,p.costPrice),profitU=p.price&&p.costPrice?p.price-p.costPrice:null;
-          return(<div key={p.id} style={{background:G.surf,border:`1px solid ${isOut?G.danger+"66":isLow?G.warn+"66":G.bdr}`,borderRadius:14,overflow:"hidden",boxShadow:"0 2px 8px rgba(0,0,0,0.07)",transition:"transform 0.14s,box-shadow 0.14s"}}>
-            <div style={{height:140,background:G.surf2,overflow:"hidden",position:"relative"}}>
-              {p.photo?<img src={p.photo} style={{width:"100%",height:"100%",objectFit:"cover"}} alt={p.name}/>:<div style={{width:"100%",height:"100%",display:"flex",alignItems:"center",justifyContent:"center",color:G.bdr,fontSize:36}}>🏠</div>}
-              <div style={{position:"absolute",top:8,right:8,background:"rgba(255,255,255,0.92)",border:`1px solid ${G.bdr}`,borderRadius:5,padding:"2px 8px",fontSize:10,color:G.gold,fontWeight:700,fontFamily:"monospace"}}>{p.code}</div>
-              {(isLow||isOut)&&<div style={{position:"absolute",top:8,left:8,background:isOut?G.danger:G.warn,borderRadius:5,padding:"2px 8px",fontSize:9,color:"#fff",fontWeight:700}}>{isOut?"OUT":"LOW"}</div>}
-              {mg!==null&&<div style={{position:"absolute",bottom:8,right:8,background:"rgba(255,255,255,0.92)",border:`1px solid ${G.bdr}`,borderRadius:5,padding:"2px 8px",fontSize:10,color:marginColor(parseFloat(mg)),fontWeight:700}}>{mg}% margin</div>}
-            </div>
-            <div style={{padding:14}}>
-              <div style={{fontSize:9,color:G.gold,fontWeight:700,letterSpacing:"0.14em",textTransform:"uppercase",marginBottom:3}}>{p.cat}</div>
-              <div style={{fontSize:14,fontWeight:600,color:G.cream,fontFamily:"'Playfair Display',serif",lineHeight:1.3,marginBottom:4}}>{p.name}</div>
-              {p.desc&&<div style={{fontSize:11,color:G.muted,marginBottom:8,lineHeight:1.5}}>{p.desc}</div>}
-              {hd&&<div style={{display:"inline-flex",alignItems:"center",gap:5,background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:5,padding:"2px 8px",marginBottom:10}}><span style={{fontSize:9,color:G.muted,textTransform:"uppercase",letterSpacing:"0.1em",fontWeight:700}}>W×H×D</span><span style={{fontSize:11,color:G.gold,fontFamily:"monospace",fontWeight:600}}>{d.w||"–"}×{d.h||"–"}×{d.d||"–"} cm</span></div>}
-              <div style={{background:G.surf2,borderRadius:8,padding:"10px 12px",marginBottom:10,border:`1px solid ${G.bdr}`}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:p.costPrice>0?6:0}}>
-                  <div><div style={{fontSize:9,color:G.muted,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:2}}>Selling Price</div><div style={{fontSize:16,fontWeight:700,color:G.goldL}}>${p.price.toLocaleString("en-CA",{minimumFractionDigits:2})}</div></div>
-                  <span style={{padding:"3px 9px",borderRadius:999,fontSize:9,fontWeight:700,textTransform:"uppercase",background:(isOut?G.danger:isLow?G.warn:G.ok)+"18",color:isOut?G.danger:isLow?G.warn:G.ok,border:`1px solid ${(isOut?G.danger:isLow?G.warn:G.ok)}44`}}>{isOut?"Out":isLow?"Low":p.stock+" in stock"}</span>
+          return(
+            <div key={p.id} style={{background:G.surf,border:`1px solid ${isOut?G.danger+"66":isLow?G.warn+"66":G.bdr}`,borderRadius:14,overflow:"hidden",boxShadow:"0 2px 8px rgba(0,0,0,0.07)",transition:"transform 0.14s,box-shadow 0.14s"}}>
+              <div style={{height:140,background:G.surf2,overflow:"hidden",position:"relative"}}>
+                {p.photo?<img src={p.photo} style={{width:"100%",height:"100%",objectFit:"cover"}} alt={p.name}/>:<div style={{width:"100%",height:"100%",display:"flex",alignItems:"center",justifyContent:"center",color:G.bdr,fontSize:36}}>🏠</div>}
+                <div style={{position:"absolute",top:8,right:8,background:"rgba(255,255,255,0.92)",border:`1px solid ${G.bdr}`,borderRadius:5,padding:"2px 8px",fontSize:10,color:G.gold,fontWeight:700,fontFamily:"monospace"}}>{p.code}</div>
+                {(isLow||isOut)&&<div style={{position:"absolute",top:8,left:8,background:isOut?G.danger:G.warn,borderRadius:5,padding:"2px 8px",fontSize:9,color:"#fff",fontWeight:700}}>{isOut?"OUT":"LOW"}</div>}
+                {mg!==null&&<div style={{position:"absolute",bottom:8,right:8,background:"rgba(255,255,255,0.92)",border:`1px solid ${G.bdr}`,borderRadius:5,padding:"2px 8px",fontSize:10,color:marginColor(parseFloat(mg)),fontWeight:700}}>{mg}% margin</div>}
+              </div>
+              <div style={{padding:14}}>
+                <div style={{fontSize:9,color:G.gold,fontWeight:700,letterSpacing:"0.14em",textTransform:"uppercase",marginBottom:3}}>{p.cat}</div>
+                <div style={{fontSize:14,fontWeight:600,color:G.cream,fontFamily:"'Playfair Display',serif",lineHeight:1.3,marginBottom:4}}>{p.name}</div>
+                {p.desc&&<div style={{fontSize:11,color:G.muted,marginBottom:8,lineHeight:1.5}}>{p.desc}</div>}
+                {hd&&<div style={{display:"inline-flex",alignItems:"center",gap:5,background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:5,padding:"2px 8px",marginBottom:10}}><span style={{fontSize:9,color:G.muted,textTransform:"uppercase",letterSpacing:"0.1em",fontWeight:700}}>W×H×D</span><span style={{fontSize:11,color:G.gold,fontFamily:"monospace",fontWeight:600}}>{d.w||"–"}×{d.h||"–"}×{d.d||"–"} cm</span></div>}
+                <div style={{background:G.surf2,borderRadius:8,padding:"10px 12px",marginBottom:10,border:`1px solid ${G.bdr}`}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:p.costPrice>0?6:0}}>
+                    <div><div style={{fontSize:9,color:G.muted,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:2}}>Selling Price</div><div style={{fontSize:16,fontWeight:700,color:G.goldL}}>${p.price.toLocaleString("en-CA",{minimumFractionDigits:2})}</div></div>
+                    <span style={{padding:"3px 9px",borderRadius:999,fontSize:9,fontWeight:700,textTransform:"uppercase",background:(isOut?G.danger:isLow?G.warn:G.ok)+"18",color:isOut?G.danger:isLow?G.warn:G.ok,border:`1px solid ${(isOut?G.danger:isLow?G.warn:G.ok)}44`}}>{isOut?"Out":isLow?"Low":p.stock+" in stock"}</span>
+                  </div>
+                  {p.costPrice>0&&<div style={{display:"flex",gap:10,paddingTop:6,borderTop:`1px solid ${G.bdr}`}}>
+                    <div style={{flex:1}}><div style={{fontSize:9,color:G.muted,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:1}}>Cost Price</div><div style={{fontSize:12,fontWeight:600,color:G.ok}}>${p.costPrice.toLocaleString("en-CA",{minimumFractionDigits:2})}</div></div>
+                    {profitU!==null&&<div style={{flex:1}}><div style={{fontSize:9,color:G.muted,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:1}}>Profit/Unit</div><div style={{fontSize:12,fontWeight:600,color:profitU>=0?G.ok:G.danger}}>{fmt(profitU)}</div></div>}
+                  </div>}
                 </div>
-                {p.costPrice>0&&<div style={{display:"flex",gap:10,paddingTop:6,borderTop:`1px solid ${G.bdr}`}}>
-                  <div style={{flex:1}}><div style={{fontSize:9,color:G.muted,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:1}}>Cost Price</div><div style={{fontSize:12,fontWeight:600,color:G.ok}}>${p.costPrice.toLocaleString("en-CA",{minimumFractionDigits:2})}</div></div>
-                  {profitU!==null&&<div style={{flex:1}}><div style={{fontSize:9,color:G.muted,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:1}}>Profit/Unit</div><div style={{fontSize:12,fontWeight:600,color:profitU>=0?G.ok:G.danger}}>{fmt(profitU)}</div></div>}
-                </div>}
-              </div>
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:8,padding:"6px 10px"}}>
-                <button onClick={()=>adj(p.id,-1)} style={{background:G.bdr,border:"none",color:G.cream,borderRadius:5,width:28,height:28,fontSize:16,fontWeight:700,cursor:"pointer"}}>−</button>
-                <span style={{flex:1,textAlign:"center",fontSize:12,color:G.muted}}>{p.stock} units</span>
-                <button onClick={()=>adj(p.id,1)} style={{background:G.bdr,border:"none",color:G.cream,borderRadius:5,width:28,height:28,fontSize:16,fontWeight:700,cursor:"pointer"}}>+</button>
-              </div>
-              <div style={{display:"flex",gap:7}}>
-                <button onClick={()=>{setEditP(p);setModal("edit");}} style={{flex:1,background:"#fff",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:7,padding:"8px 6px",fontSize:12,fontWeight:600,cursor:"pointer"}}>Edit</button>
-                <button onClick={()=>{setDelId(p.id);setModal("del");}} style={{flex:1,background:G.danger+"10",border:`1px solid ${G.danger}44`,color:G.danger,borderRadius:7,padding:"8px 6px",fontSize:12,fontWeight:600,cursor:"pointer"}}>Delete</button>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:8,padding:"6px 10px"}}>
+                  <button onClick={()=>onAdjustStock(p,-1)} style={{background:G.bdr,border:"none",color:G.cream,borderRadius:5,width:28,height:28,fontSize:16,fontWeight:700,cursor:"pointer"}}>−</button>
+                  <span style={{flex:1,textAlign:"center",fontSize:12,color:G.muted}}>{p.stock} units</span>
+                  <button onClick={()=>onAdjustStock(p,1)} style={{background:G.bdr,border:"none",color:G.cream,borderRadius:5,width:28,height:28,fontSize:16,fontWeight:700,cursor:"pointer"}}>+</button>
+                </div>
+                <div style={{display:"flex",gap:7}}>
+                  <button onClick={()=>{setEditP(p);setModal("edit");}} style={{flex:1,background:"#fff",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:7,padding:"8px 6px",fontSize:12,fontWeight:600,cursor:"pointer"}}>Edit</button>
+                  <button onClick={()=>{setDelId(p.id);setModal("del");}} style={{flex:1,background:G.danger+"10",border:`1px solid ${G.danger}44`,color:G.danger,borderRadius:7,padding:"8px 6px",fontSize:12,fontWeight:600,cursor:"pointer"}}>Delete</button>
+                </div>
               </div>
             </div>
-          </div>);
+          );
         })}
       </div>)}
+
+      {/* Table */}
       {vw==="table"&&<div style={{background:G.surf,border:`1px solid ${G.bdr}`,borderRadius:12,overflow:"auto",boxShadow:"0 1px 4px rgba(0,0,0,0.06)"}}>
         <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:900}}>
           <thead><tr style={{borderBottom:`2px solid ${G.bdr}`,background:G.surf2}}>{["","Code","Name","Category","Dims","Sell Price","Cost","Profit","Margin","Stock","Status",""].map((h,i)=><th key={i} style={{padding:"10px 12px",textAlign:"left",color:G.muted,fontSize:9,fontWeight:700,letterSpacing:"0.12em",textTransform:"uppercase",whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
           <tbody>{filtered.map((p,idx)=>{
-            const isLow=p.stock<=p.minStock&&p.stock>0,isOut=p.stock===0,d=p.dims,mg=calcMargin(p.price,p.costPrice),profitU=p.price&&p.costPrice?p.price-p.costPrice:null;
+            const isLow=p.stock<=p.minStock&&p.stock>0,isOut=p.stock===0,d=p.dims;
+            const mg=calcMargin(p.price,p.costPrice),profitU=p.price&&p.costPrice?p.price-p.costPrice:null;
             return<tr key={p.id} style={{borderBottom:`1px solid ${G.bdr}`,background:idx%2===0?"#fff":G.surf2}}>
               <td style={{padding:"7px 12px"}}><div style={{width:32,height:32,borderRadius:5,overflow:"hidden",background:G.surf2,border:`1px solid ${G.bdr}`}}>{p.photo?<img src={p.photo} style={{width:"100%",height:"100%",objectFit:"cover"}}/>:<div style={{width:"100%",height:"100%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13}}>🏠</div>}</div></td>
               <td style={{padding:"7px 12px",color:G.gold,fontFamily:"monospace",fontWeight:700,fontSize:10,whiteSpace:"nowrap"}}>{p.code}</td>
@@ -782,9 +696,9 @@ function InventoryTab({prods,persist}){
               <td style={{padding:"7px 12px",fontWeight:600,whiteSpace:"nowrap",color:profitU!==null?(profitU>=0?G.ok:G.danger):G.muted}}>{profitU!==null?fmt(profitU):"—"}</td>
               <td style={{padding:"7px 12px",fontWeight:700,whiteSpace:"nowrap",color:mg!==null?marginColor(parseFloat(mg)):G.muted}}>{mg!==null?mg+"%":"—"}</td>
               <td style={{padding:"7px 12px"}}><div style={{display:"flex",alignItems:"center",gap:4}}>
-                <button onClick={()=>adj(p.id,-1)} style={{background:G.surf2,border:`1px solid ${G.bdr}`,color:G.cream,borderRadius:4,width:22,height:22,fontSize:12,cursor:"pointer"}}>−</button>
+                <button onClick={()=>onAdjustStock(p,-1)} style={{background:G.surf2,border:`1px solid ${G.bdr}`,color:G.cream,borderRadius:4,width:22,height:22,fontSize:12,cursor:"pointer"}}>−</button>
                 <span style={{color:G.cream,fontWeight:700,minWidth:20,textAlign:"center"}}>{p.stock}</span>
-                <button onClick={()=>adj(p.id,1)} style={{background:G.surf2,border:`1px solid ${G.bdr}`,color:G.cream,borderRadius:4,width:22,height:22,fontSize:12,cursor:"pointer"}}>+</button>
+                <button onClick={()=>onAdjustStock(p,1)} style={{background:G.surf2,border:`1px solid ${G.bdr}`,color:G.cream,borderRadius:4,width:22,height:22,fontSize:12,cursor:"pointer"}}>+</button>
               </div></td>
               <td style={{padding:"7px 12px"}}><span style={{padding:"2px 7px",borderRadius:999,fontSize:8,fontWeight:700,textTransform:"uppercase",background:(isOut?G.danger:isLow?G.warn:G.ok)+"18",color:isOut?G.danger:isLow?G.warn:G.ok,border:`1px solid ${(isOut?G.danger:isLow?G.warn:G.ok)}44`,whiteSpace:"nowrap"}}>{isOut?"OUT":isLow?`LOW·${p.stock}`:`OK·${p.stock}`}</span></td>
               <td style={{padding:"7px 12px"}}><div style={{display:"flex",gap:5}}>
@@ -795,8 +709,10 @@ function InventoryTab({prods,persist}){
           })}</tbody>
         </table>
       </div>}
-      {(modal==="add"||modal==="edit")&&<InvModal key={editP?.id||"new"} initial={editP} onSave={saveProduct} onClose={()=>{setModal(null);setEditP(null);}}/>}
-      {modal==="del"&&<ModalWrap onClose={()=>{setModal(null);setDelId(null);}} maxW={360}><div style={{padding:28,textAlign:"center"}}><div style={{fontSize:36,marginBottom:12}}>🗑️</div><h3 style={{color:G.cream,fontFamily:"'Playfair Display',serif",marginBottom:8,fontSize:18}}>Delete Product?</h3><p style={{color:G.muted,fontSize:13,marginBottom:22}}>This cannot be undone.</p><div style={{display:"flex",gap:10,justifyContent:"center"}}><button onClick={()=>{setModal(null);setDelId(null);}} style={{background:"#fff",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:7,padding:"10px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>Cancel</button><button onClick={del} style={{background:G.danger,border:"none",color:"#fff",borderRadius:7,padding:"10px 18px",fontSize:13,fontWeight:700,cursor:"pointer"}}>Delete</button></div></div></ModalWrap>}
+
+      {/* Modals */}
+      {(modal==="add"||modal==="edit")&&<InvModal key={editP?.id||"new"} initial={editP} onSave={p=>{onSaveProduct(p);setModal(null);setEditP(null);}} onClose={()=>{setModal(null);setEditP(null);}}/>}
+      {modal==="del"&&<ModalWrap onClose={()=>{setModal(null);setDelId(null);}} maxW={360}><div style={{padding:28,textAlign:"center"}}><div style={{fontSize:36,marginBottom:12}}>🗑️</div><h3 style={{color:G.cream,fontFamily:"'Playfair Display',serif",marginBottom:8,fontSize:18}}>Delete Product?</h3><p style={{color:G.muted,fontSize:13,marginBottom:22}}>This cannot be undone.</p><div style={{display:"flex",gap:10,justifyContent:"center"}}><button onClick={()=>{setModal(null);setDelId(null);}} style={{background:"#fff",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:7,padding:"10px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>Cancel</button><button onClick={()=>{onDeleteProduct(delId);setModal(null);setDelId(null);}} style={{background:G.danger,border:"none",color:"#fff",borderRadius:7,padding:"10px 18px",fontSize:13,fontWeight:700,cursor:"pointer"}}>Delete</button></div></div></ModalWrap>}
     </div>
   );
 }
@@ -887,23 +803,91 @@ export default function LavisHomeApp(){
   const [tab,setTab]=useState("inventory");
   const [saved,setSaved]=useState("");
 
+  // ── Firebase: inventory now uses ONE doc per product (lavishome_products collection)
+  // ── transactions and quotes remain as single docs (no photos = no size issue)
   useEffect(()=>{
     let invOk=false,txnOk=false,qtOk=false;
     function check(){if(invOk&&txnOk&&qtOk)setLoaded(true);}
-    const timeout=setTimeout(()=>{if(!invOk)setProds(SAMPLE_INV);if(!txnOk)setTxns(SAMPLE_TXN);if(!qtOk)setQuotes([]);setLoaded(true);},8000);
-    const unsubInv=onSnapshot(doc(db,"lavishome","inventory"),snap=>{setProds(snap.exists()?(snap.data().items||[]):SAMPLE_INV);invOk=true;check();},()=>{setProds(SAMPLE_INV);invOk=true;check();});
-    const unsubTxn=onSnapshot(doc(db,"lavishome","transactions"),snap=>{setTxns(snap.exists()?(snap.data().items||[]):SAMPLE_TXN);txnOk=true;check();},()=>{setTxns(SAMPLE_TXN);txnOk=true;check();});
-    const unsubQt=onSnapshot(doc(db,"lavishome","quotes"),snap=>{setQuotes(snap.exists()?(snap.data().items||[]):[]);qtOk=true;check();},()=>{setQuotes([]);qtOk=true;check();});
+    const timeout=setTimeout(()=>{
+      if(!invOk)setProds(SAMPLE_INV);
+      if(!txnOk)setTxns(SAMPLE_TXN);
+      if(!qtOk)setQuotes([]);
+      setLoaded(true);
+    },8000);
+
+    // Products: listen to entire collection — each product is its own document
+    // This means no size limit — each product can be up to 1MB on its own
+    const unsubInv=onSnapshot(
+      collection(db,"lavishome_products"),
+      snap=>{
+        const items=snap.docs.map(d=>d.data());
+        // If collection is empty, check old structure and migrate
+        if(items.length===0&&!invOk){
+          getDoc(doc(db,"lavishome","inventory")).then(oldDoc=>{
+            if(oldDoc.exists()&&oldDoc.data().items?.length>0){
+              const oldItems=oldDoc.data().items;
+              Promise.all(oldItems.map(p=>setDoc(doc(db,"lavishome_products",p.id),p)))
+                .then(()=>console.log("Migrated",oldItems.length,"products to new structure"));
+            } else {
+              // Truly empty — seed with sample data so app isn't blank
+              Promise.all(SAMPLE_INV.map(p=>setDoc(doc(db,"lavishome_products",p.id),p)));
+            }
+          }).catch(()=>{});
+        }
+        setProds(items);invOk=true;check();
+      },
+      ()=>{setProds(SAMPLE_INV);invOk=true;check();}
+    );
+
+    const unsubTxn=onSnapshot(doc(db,"lavishome","transactions"),
+      snap=>{setTxns(snap.exists()?(snap.data().items||[]):SAMPLE_TXN);txnOk=true;check();},
+      ()=>{setTxns(SAMPLE_TXN);txnOk=true;check();}
+    );
+    const unsubQt=onSnapshot(doc(db,"lavishome","quotes"),
+      snap=>{setQuotes(snap.exists()?(snap.data().items||[]):[]);qtOk=true;check();},
+      ()=>{setQuotes([]);qtOk=true;check();}
+    );
     return()=>{unsubInv();unsubTxn();unsubQt();clearTimeout(timeout);};
   },[]);
 
   function flash(){setSaved("Saved ✓");setTimeout(()=>setSaved(""),2000);}
-  async function persistInv(list){setProds(list);try{await setDoc(doc(db,"lavishome","inventory"),{items:list});flash();}catch{setSaved("Save failed");}}
-  async function persistTxn(list){setTxns(list);try{await setDoc(doc(db,"lavishome","transactions"),{items:list});flash();}catch{setSaved("Save failed");}}
-  async function persistQuotes(list){setQuotes(list);try{await setDoc(doc(db,"lavishome","quotes"),{items:list});flash();}catch{setSaved("Save failed");}}
 
+  // ── Save a single product to its own Firestore document (with retry)
+  async function handleSaveProduct(product){
+    setProds(prev=>prev.find(x=>x.id===product.id)?prev.map(x=>x.id===product.id?product:x):[...prev,product]);
+    const ok=await saveWithRetry(doc(db,"lavishome_products",product.id),product);
+    if(ok)flash();else setSaved("Save failed — retrying…");
+  }
+
+  // ── Delete a single product document
+  async function handleDeleteProduct(id){
+    setProds(prev=>prev.filter(p=>p.id!==id));
+    try{await deleteDoc(doc(db,"lavishome_products",id));flash();}
+    catch{setSaved("Delete failed");}
+  }
+
+  // ── Adjust stock on a single product (with retry)
+  async function handleAdjustStock(product,delta){
+    const updated={...product,stock:Math.max(0,product.stock+delta)};
+    setProds(prev=>prev.map(p=>p.id===updated.id?updated:p));
+    await saveWithRetry(doc(db,"lavishome_products",updated.id),updated);
+  }
+
+  // ── Transactions — kept as single doc (no photos, no size concern)
+  async function persistTxn(list){
+    setTxns(list);
+    const ok=await saveWithRetry(doc(db,"lavishome","transactions"),{items:list});
+    if(ok)flash();else setSaved("Save failed");
+  }
   function addOrUpdateTxn(t){const u=txns.find(x=>x.id===t.id)?txns.map(x=>x.id===t.id?t:x):[...txns,t];persistTxn(u);}
   function delTxn(id){persistTxn(txns.filter(t=>t.id!==id));}
+
+  // ── Quotes — kept as single doc (photos already compressed in quote items)
+  async function persistQuotes(list){
+    setQuotes(list);
+    const ok=await saveWithRetry(doc(db,"lavishome","quotes"),{items:list});
+    if(ok)flash();else setSaved("Save failed");
+  }
   function saveQuote(q){persistQuotes([q,...quotes]);}
   function updateQuoteStatus(id,status){persistQuotes(quotes.map(q=>q.id===id?{...q,status}:q));}
   function deleteQuote(id){persistQuotes(quotes.filter(q=>q.id!==id));}
@@ -941,12 +925,9 @@ export default function LavisHomeApp(){
           </div>
           <div className="lh-hdr-tabs" style={{display:"flex",gap:2}}>
             {Object.entries(TAB_LABELS).map(([k,l])=>(
-              <button key={k} onClick={()=>setTab(k)} style={{background:tab===k?G.goldL:"transparent",border:`1px solid ${tab===k?G.goldL:G.bdr}`,color:tab===k?"#fff":G.muted,borderRadius:7,padding:isMobile?"7px 10px":"7px 14px",fontSize:isMobile?12:12,fontWeight:700,cursor:"pointer",transition:"all 0.12s",whiteSpace:"nowrap",position:"relative"}}>
+              <button key={k} onClick={()=>setTab(k)} style={{background:tab===k?G.goldL:"transparent",border:`1px solid ${tab===k?G.goldL:G.bdr}`,color:tab===k?"#fff":G.muted,borderRadius:7,padding:isMobile?"7px 10px":"7px 14px",fontSize:12,fontWeight:700,cursor:"pointer",transition:"all 0.12s",whiteSpace:"nowrap",position:"relative"}}>
                 {l}
-                {/* Red dot for pending quotes */}
-                {k==="quotes"&&pendingQuotes>0&&tab!=="quotes"&&(
-                  <span style={{position:"absolute",top:-3,right:-3,width:8,height:8,borderRadius:"50%",background:G.warn,border:"2px solid #fff"}}/>
-                )}
+                {k==="quotes"&&pendingQuotes>0&&tab!=="quotes"&&<span style={{position:"absolute",top:-3,right:-3,width:8,height:8,borderRadius:"50%",background:G.warn,border:"2px solid #fff"}}/>}
               </button>
             ))}
           </div>
@@ -959,14 +940,14 @@ export default function LavisHomeApp(){
               <div style={{width:6,height:6,borderRadius:"50%",background:G.ok}}></div>
               <span style={{fontSize:9,color:G.muted,fontWeight:600}}>Live</span>
             </div>
-            {saved&&<span style={{fontSize:11,color:G.ok,fontWeight:600}}>{saved}</span>}
+            {saved&&<span style={{fontSize:11,color:saved.includes("failed")?"#b83232":G.ok,fontWeight:600}}>{saved}</span>}
           </div>
         </div>
       </div>
 
       {/* ── Body ── */}
       <div style={{maxWidth:1300,margin:"0 auto",padding:isMobile?"16px 12px 100px":"28px 24px 100px"}}>
-        {tab==="inventory"&&<InventoryTab prods={prods} persist={persistInv}/>}
+        {tab==="inventory"&&<InventoryTab prods={prods} onSaveProduct={handleSaveProduct} onDeleteProduct={handleDeleteProduct} onAdjustStock={handleAdjustStock}/>}
         {tab==="catalog"  &&<CatalogTab prods={prods} onSaveQuote={saveQuote}/>}
         {tab==="quotes"   &&<QuoteHistoryTab quotes={quotes} onUpdateStatus={updateQuoteStatus} onDelete={deleteQuote}/>}
         {tab==="finance"  &&<FinanceTab txns={txns} onAddTxn={addOrUpdateTxn} onDelTxn={delTxn}/>}
