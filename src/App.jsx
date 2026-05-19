@@ -608,7 +608,7 @@ function AcceptQuoteModal({quote, onConfirm, onClose}){
           <div style={{fontSize:10,color:G.gold,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:12}}>Confirm Products & Quantities</div>
           <div style={{fontSize:11,color:G.muted,marginBottom:10}}>Adjust if client changed their mind on quantities or negotiated a different price.</div>
           {items.map(it=>(
-            <div key={it.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 0",borderBottom:}}>
+            <div key={it.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 0",borderBottom:`1px solid ${G.bdr}`}}>
               {/* Thumb */}
               <div style={{width:40,height:40,borderRadius:7,overflow:"hidden",background:G.surf,border:`1px solid ${G.bdr}`,flexShrink:0}}>
                 {it.photo?<img src={it.photo} style={{width:"100%",height:"100%",objectFit:"cover"}} alt={it.name}/>:<div style={{width:"100%",height:"100%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>🏠</div>}
