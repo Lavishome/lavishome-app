@@ -26,10 +26,7 @@ const googleProvider = new GoogleAuthProvider();
 // Add your team's Google email addresses here.
 // Only these emails can log in. Anyone else sees "Access Denied".
 const APPROVED_EMAILS = [
-  "rohit@lavishome.ca",       // ← replace with your real emails
-  "team1@lavishome.ca",
-  "team2@lavishome.ca",
-  "team3@lavishome.ca",
+  "sales@lavishome.ca",
 ];
 
 const CATS     = ["Sofas","Beds","Executive Desk","Coffee Tables","Consoles"];
