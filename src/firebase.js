@@ -1,13 +1,13 @@
 // src/firebase.js
-// ─────────────────────────────────────────────────────────────
-// STEP: Replace the values below with YOUR Firebase project details
-// You get these from: Firebase Console → Project Settings → Your Apps
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────
+// Your Firebase project credentials
+// ─────────────────────────────────────────────────────────────────────────
 import { initializeApp } from "firebase/app";
-import { getFirestore } from "firebase/firestore";
+import { getFirestore }  from "firebase/firestore";
+import { getAuth }       from "firebase/auth";
 
 const firebaseConfig = {
-  apiKey:            "AIzaSyDllHiiTIMQ2ZBux9Kt_el_iW3yszdd1Ck",
+  apiKey:            "AIzaSyD1lHiiTIMQ2ZBux9Kt_el_iW3yszdd1Ck",
   authDomain:        "lavishome.firebaseapp.com",
   projectId:         "lavishome",
   storageBucket:     "lavishome.firebasestorage.app",
@@ -16,4 +16,5 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app);
+export const db   = getFirestore(app);
+export const auth = getAuth(app);
