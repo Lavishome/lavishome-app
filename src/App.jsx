@@ -4,6 +4,11 @@ import {
   collection, doc,
   onSnapshot, setDoc, deleteDoc, getDoc,
 } from "firebase/firestore";
+import {
+  getAuth, GoogleAuthProvider,
+  signInWithPopup, signOut, onAuthStateChanged,
+} from "firebase/auth";
+
 
 // ── Colour tokens ────────────────────────────────────────────────────────
 const G = {
@@ -12,8 +17,23 @@ const G = {
   danger:"#b83232", warn:"#b86010", ok:"#1a6e3a", info:"#1660a0",
 };
 
+// ── Firebase Auth instance ───────────────────────────────────────────────
+const auth = getAuth();
+const googleProvider = new GoogleAuthProvider();
+
+
+// ── APPROVED EMAIL ADDRESSES ─────────────────────────────────────────────
+// Add your team's Google email addresses here.
+// Only these emails can log in. Anyone else sees "Access Denied".
+const APPROVED_EMAILS = [
+  "sales@lavishome.ca",
+];
+
 const CATS     = ["Sofas","Beds","Executive Desk","Coffee Tables","Consoles"];
-const ALL_CATS = ["All",...CATS];
+const SERVICE_CAT = "Services & Add-ons";
+const ALL_CATS_INV = ["All",...CATS];  // Inventory — no services
+const ALL_CATS_CAT = ["All",...CATS,SERVICE_CAT]; // Catalog — includes services
+// ALL_CATS defined per context above (ALL_CATS_INV and ALL_CATS_CAT)
 
 const TXN_TYPES = {
   "Sale – Cash":          {cash: 1,debtor: 0,creditor: 0,equity: 1, color:"#1a6e3a",icon:"💰",group:"Revenue"},
@@ -63,6 +83,19 @@ function compressPhoto(dataUrl, maxWidth=600, quality=0.7){
     img.onerror=()=>resolve(dataUrl); // fallback: keep original if error
     img.src=dataUrl;
   });
+}
+
+// ── Quote expiry helpers ─────────────────────────────────────────────────
+function getExpiryStatus(quoteDate, status){
+  if(status !== "Pending") return null; // Only pending quotes expire
+  const created = new Date(quoteDate + "T00:00:00");
+  const expiry  = new Date(created);
+  expiry.setDate(expiry.getDate() + 7);
+  const now     = new Date();
+  const daysLeft = Math.ceil((expiry - now) / (1000 * 60 * 60 * 24));
+  if(daysLeft < 0)  return { label: "Expired",        color: G.danger, bg: G.danger+"18", border: G.danger+"44", days: daysLeft };
+  if(daysLeft <= 2) return { label: `Expires in ${daysLeft}d`, color: G.warn, bg: G.warn+"18", border: G.warn+"44", days: daysLeft };
+  return null; // Fine — no flag needed
 }
 
 // ── Firebase save with retry ─────────────────────────────────────────────
@@ -131,6 +164,105 @@ const GLOBAL_CSS=`
   }
 `;
 
+// ══════════════════════════════════════════════════════════════════════════
+//  SET NAME MODAL — shown once on first login
+// ══════════════════════════════════════════════════════════════════════════
+function SetNameModal({user, onSave}){
+  const [name, setName] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function handleSave(){
+    if(!name.trim()) return alert("Please enter your name.");
+    setSaving(true);
+    await saveWithRetry(doc(db,"lavishome_users",user.uid),{
+      uid: user.uid,
+      email: user.email,
+      displayName: name.trim(),
+      createdAt: Date.now(),
+    });
+    onSave(name.trim());
+  }
+
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(28,24,20,0.6)",zIndex:400,display:"flex",alignItems:"center",justifyContent:"center",padding:24,fontFamily:"'DM Sans',sans-serif"}}>
+      <div style={{background:"#fff",border:`1px solid ${G.bdr}`,borderRadius:20,padding:"40px 36px",maxWidth:380,width:"100%",boxShadow:"0 8px 48px rgba(0,0,0,0.12)",textAlign:"center"}}>
+        <div style={{fontSize:40,marginBottom:16}}>👋</div>
+        <div style={{fontFamily:"'Playfair Display',serif",fontSize:22,fontWeight:700,color:G.goldL,marginBottom:8}}>Welcome to Lavishome</div>
+        <div style={{fontSize:13,color:G.muted,marginBottom:6,lineHeight:1.6}}>Signed in as <strong style={{color:G.cream}}>{user.email}</strong></div>
+        <div style={{fontSize:13,color:G.muted,marginBottom:28,lineHeight:1.6}}>To personalise your activity records, please enter your name. This only needs to be done once.</div>
+        <div style={{marginBottom:20,textAlign:"left"}}>
+          <label style={{...{fontSize:10,fontWeight:700,letterSpacing:"0.1em",color:G.muted,textTransform:"uppercase",display:"block",marginBottom:5}}}>Your Name</label>
+          <input
+            autoFocus
+            style={{background:"#fff",border:`1px solid ${G.bdr}`,borderRadius:8,color:G.cream,padding:"11px 14px",fontSize:15,outline:"none",fontFamily:"inherit",width:"100%"}}
+            value={name}
+            onChange={e=>setName(e.target.value)}
+            onKeyDown={e=>e.key==="Enter"&&handleSave()}
+            placeholder="e.g. Rohit"
+          />
+        </div>
+        <button
+          onClick={handleSave}
+          disabled={saving||!name.trim()}
+          style={{width:"100%",background:saving||!name.trim()?G.muted:G.goldL,border:"none",color:"#fff",borderRadius:10,padding:"13px 20px",fontSize:14,fontWeight:700,cursor:saving?"not-allowed":"pointer",fontFamily:"'DM Sans',sans-serif"}}>
+          {saving?"Saving…":"Save & Continue →"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  LOGIN SCREEN
+// ══════════════════════════════════════════════════════════════════════════
+function LoginScreen({onLogin, loading, error}){
+  return(
+    <div style={{minHeight:"100vh",background:G.bg,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'DM Sans',sans-serif",padding:24}}>
+      <div style={{background:G.surf,border:`1px solid ${G.bdr}`,borderRadius:20,padding:"48px 40px",maxWidth:400,width:"100%",boxShadow:"0 8px 48px rgba(0,0,0,0.10)",textAlign:"center"}}>
+        {/* Logo */}
+        <div style={{width:56,height:56,background:G.goldL,borderRadius:14,display:"flex",alignItems:"center",justifyContent:"center",fontSize:26,margin:"0 auto 20px"}}>🏠</div>
+        <div style={{fontFamily:"'Playfair Display',serif",fontSize:26,fontWeight:700,color:G.goldL,letterSpacing:"0.04em",marginBottom:6}}>Lavishome</div>
+        <div style={{fontSize:11,color:G.muted,letterSpacing:"0.16em",textTransform:"uppercase",marginBottom:32}}>Business Manager</div>
+        <div style={{fontSize:14,color:G.muted,marginBottom:32,lineHeight:1.6}}>Sign in with your Google account to access the Lavishome business portal.</div>
+        {error&&<div style={{background:G.danger+"10",border:`1px solid ${G.danger}33`,borderRadius:10,padding:"10px 16px",marginBottom:20,fontSize:13,color:G.danger,fontWeight:600}}>{error}</div>}
+        <button
+          onClick={onLogin}
+          disabled={loading}
+          style={{width:"100%",background:loading?"#ccc":G.goldL,border:"none",color:"#fff",borderRadius:10,padding:"14px 20px",fontSize:14,fontWeight:700,cursor:loading?"not-allowed":"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:10,fontFamily:"'DM Sans',sans-serif",transition:"background 0.14s"}}>
+          {loading
+            ? <span>Signing in…</span>
+            : <><span style={{fontSize:18}}>G</span><span>Sign in with Google</span></>
+          }
+        </button>
+        <div style={{fontSize:11,color:G.muted,marginTop:20}}>Access is restricted to approved Lavishome team members only.</div>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  ACCESS DENIED SCREEN
+// ══════════════════════════════════════════════════════════════════════════
+function AccessDeniedScreen({user, onSignOut}){
+  return(
+    <div style={{minHeight:"100vh",background:G.bg,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'DM Sans',sans-serif",padding:24}}>
+      <div style={{background:G.surf,border:`1px solid ${G.bdr}`,borderRadius:20,padding:"48px 40px",maxWidth:400,width:"100%",boxShadow:"0 8px 48px rgba(0,0,0,0.10)",textAlign:"center"}}>
+        <div style={{fontSize:48,marginBottom:16}}>🚫</div>
+        <div style={{fontFamily:"'Playfair Display',serif",fontSize:22,fontWeight:700,color:G.cream,marginBottom:12}}>Access Denied</div>
+        <div style={{fontSize:13,color:G.muted,marginBottom:8,lineHeight:1.6}}>
+          The account <strong style={{color:G.cream}}>{user?.email}</strong> is not authorised to access this portal.
+        </div>
+        <div style={{fontSize:13,color:G.muted,marginBottom:32,lineHeight:1.6}}>
+          Please contact Rohit to request access, or sign in with a different Google account.
+        </div>
+        <button onClick={onSignOut} style={{width:"100%",background:G.goldL,border:"none",color:"#fff",borderRadius:10,padding:"12px 20px",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans',sans-serif"}}>
+          Sign Out & Try Again
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── Modal wrapper ────────────────────────────────────────────────────────
 function ModalWrap({onClose,children,maxW=540}){
   return(
@@ -146,7 +278,7 @@ function ModalWrap({onClose,children,maxW=540}){
 //  QUOTE PAGE GENERATOR
 // ══════════════════════════════════════════════════════════════════════════
 function generateQuotePage(selectedProds,quoteInfo,existingRef=null){
-  const{clientName,preparedBy,notes,discountType,discountValue,quoteDate}=quoteInfo;
+  const{clientName,clientPhone,clientEmail,clientAddress,preparedBy,notes,discountType,discountValue,quoteDate}=quoteInfo;
   const quoteRef=existingRef||makeRef();
   const subtotal=selectedProds.reduce((s,p)=>s+p.price*(p.qty||1),0);
   const discAmt=discountType==="%"?subtotal*(parseFloat(discountValue)||0)/100:parseFloat(discountValue)||0;
@@ -154,20 +286,27 @@ function generateQuotePage(selectedProds,quoteInfo,existingRef=null){
   const validUntil=addDays(quoteDate,7);
   const productRows=selectedProds.map(p=>{
     const photoHtml=p.photo?`<img src="${p.photo}" style="width:80px;height:65px;object-fit:cover;border-radius:8px;border:1px solid #ddd4c4;">`:`<div style="width:80px;height:65px;background:#ede8e0;border-radius:8px;border:1px solid #ddd4c4;display:flex;align-items:center;justify-content:center;font-size:28px">🏠</div>`;
-    const dimsStr=p.dims&&(p.dims.w||p.dims.h||p.dims.d)?`W${p.dims.w||"–"} × H${p.dims.h||"–"} × D${p.dims.d||"–"} cm`:"";
-    return`<tr><td style="padding:14px 12px;vertical-align:middle">${photoHtml}</td><td style="padding:14px 12px;vertical-align:middle"><div style="font-family:'Playfair Display',serif;font-size:15px;font-weight:600;color:#1c1814;margin-bottom:3px">${p.name}</div><div style="font-size:11px;color:#8a6820;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:2px">${p.cat}</div>${p.desc?`<div style="font-size:12px;color:#7a6e62;margin-bottom:2px">${p.desc}</div>`:""}${dimsStr?`<div style="font-size:11px;color:#7a6e62;font-family:monospace">📐 ${dimsStr}</div>`:""}</td><td style="padding:14px 12px;vertical-align:middle;text-align:center;font-size:13px;color:#1c1814;font-weight:600">${p.qty||1}</td><td style="padding:14px 12px;vertical-align:middle;text-align:right;font-size:14px;font-weight:700;color:#6a4e10;font-family:'Playfair Display',serif">${fmt(p.price)}</td><td style="padding:14px 12px;vertical-align:middle;text-align:right;font-size:14px;font-weight:700;color:#1c1814;font-family:'Playfair Display',serif">${fmt(p.price*(p.qty||1))}</td></tr>`;
+    const isService=p.cat==="Services & Add-ons";
+    const dimsStr=!isService&&p.dims&&(p.dims.w||p.dims.h||p.dims.d)?`W${p.dims.w||"–"} × H${p.dims.h||"–"} × D${p.dims.d||"–"} cm`:"";
+    return`<tr><td style="padding:14px 12px;vertical-align:middle">${photoHtml}</td><td style="padding:14px 12px;vertical-align:middle"><div style="font-family:'Playfair Display',serif;font-size:15px;font-weight:600;color:#1c1814;margin-bottom:3px">${p.name}</div><div style="font-size:11px;color:#8a6820;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:2px">${isService?"🔧 "+p.cat:p.cat}</div>${p.desc?`<div style="font-size:12px;color:#7a6e62;margin-bottom:2px">${p.desc}</div>`:""}${dimsStr?`<div style="font-size:11px;color:#7a6e62;font-family:monospace">📐 ${dimsStr}</div>`:""}</td><td style="padding:14px 12px;vertical-align:middle;text-align:center;font-size:13px;color:#1c1814;font-weight:600">${p.qty||1}</td><td style="padding:14px 12px;vertical-align:middle;text-align:right;font-size:14px;font-weight:700;color:#6a4e10;font-family:'Playfair Display',serif">${fmt(p.price)}</td><td style="padding:14px 12px;vertical-align:middle;text-align:right;font-size:14px;font-weight:700;color:#1c1814;font-family:'Playfair Display',serif">${fmt(p.price*(p.qty||1))}</td></tr>`;
   }).join("");
   const discountRow=discAmt>0?`<tr><td colspan="4" style="padding:10px 12px;text-align:right;color:#b86010;font-weight:600;font-size:13px">Discount ${discountType==="%"?`(${discountValue}%)`:"(Fixed)"}</td><td style="padding:10px 12px;text-align:right;color:#b86010;font-weight:700;font-size:14px">−${fmt(discAmt)}</td></tr>`:"";
-  const html=`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Lavishome Quote — ${clientName}</title><link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet"><style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:'DM Sans',sans-serif;background:#f5f1eb;color:#1c1814;padding:24px 16px}.page{max-width:860px;margin:0 auto;background:#fff;border-radius:16px;box-shadow:0 4px 32px rgba(0,0,0,0.10);overflow:hidden}.print-btn{position:fixed;bottom:20px;right:20px;background:#6a4e10;color:#fff;border:none;border-radius:999px;padding:12px 24px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:700;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,0.18);z-index:100}table{width:100%;border-collapse:collapse}tbody tr{border-bottom:1px solid #ede8e0}@media print{body{background:#fff;padding:0}.page{box-shadow:none;border-radius:0}.print-btn{display:none}}@media(max-width:600px){.hdr-flex{flex-direction:column!important;gap:12px!important;text-align:center!important}.info-grid{grid-template-columns:1fr!important}}</style></head><body>
+  const html=`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Lavishome Quote — ${clientName}</title><link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet"><style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:'DM Sans',sans-serif;background:#f5f1eb;color:#1c1814;padding:24px 16px}.page{max-width:860px;margin:0 auto;background:#fff;border-radius:16px;box-shadow:0 4px 32px rgba(0,0,0,0.10);overflow:hidden}.print-btn{position:fixed;bottom:20px;right:20px;background:#ba5f33;color:#fff;border:none;border-radius:999px;padding:12px 24px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:700;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,0.18);z-index:100}table{width:100%;border-collapse:collapse}tbody tr{border-bottom:1px solid #ede8e0}@media print{@page{margin:0.8cm;size:A4}body{background:#fff;padding:0}.page{box-shadow:none;border-radius:0}.print-btn{display:none}}@media(max-width:600px){.hdr-flex{flex-direction:column!important;gap:12px!important;text-align:center!important}.info-grid{grid-template-columns:1fr!important}}</style></head><body>
 <button class="print-btn" onclick="window.print()">🖨️ Print / Save as PDF</button>
 <div class="page">
-<div style="background:#6a4e10;padding:28px 32px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px" class="hdr-flex"><div><div style="font-family:'Playfair Display',serif;font-size:26px;font-weight:700;color:#fff;letter-spacing:0.04em">LAVISHOME</div><div style="font-size:10px;color:#e8c27a;letter-spacing:0.2em;text-transform:uppercase;margin-top:3px">Luxury Furniture</div></div><div style="text-align:right"><div style="font-family:'Playfair Display',serif;font-size:20px;font-weight:600;color:#fff">Quote / Estimate</div><div style="font-size:12px;color:#e8c27a;margin-top:3px;font-family:monospace">${quoteRef}</div></div></div>
-<div style="padding:24px 32px;display:grid;grid-template-columns:1fr 1fr;gap:24px;border-bottom:1px solid #ede8e0" class="info-grid"><div><div style="font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.12em;font-weight:700;margin-bottom:6px">Prepared For</div><div style="font-family:'Playfair Display',serif;font-size:20px;font-weight:600;color:#1c1814">${clientName}</div></div><div style="text-align:right"><div style="margin-bottom:6px"><span style="font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.1em">Date: </span><span style="font-size:13px;color:#1c1814;font-weight:600">${fmtDate(quoteDate)}</span></div><div style="margin-bottom:6px"><span style="font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.1em">Prepared By: </span><span style="font-size:13px;color:#1c1814;font-weight:600">${preparedBy||"Lavishome Team"}</span></div><div style="background:#fff8e8;border:1px solid #e8c27a44;border-radius:8px;padding:6px 12px;display:inline-block;margin-top:2px"><span style="font-size:11px;color:#8a6820;font-weight:700">⏱ Valid until ${validUntil} or while stocks last</span></div></div></div>
+<div style="background:#ba5f33;padding:28px 32px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px" class="hdr-flex"><div><div style="font-family:'Playfair Display',serif;font-size:26px;font-weight:700;color:#fff;letter-spacing:0.04em">LAVISHOME</div><div style="font-size:10px;color:#e8c27a;letter-spacing:0.2em;text-transform:uppercase;margin-top:3px">Luxury Furniture</div></div><div style="text-align:right"><div style="font-family:'Playfair Display',serif;font-size:20px;font-weight:600;color:#fff">Quote / Estimate</div><div style="font-size:12px;color:#e8c27a;margin-top:3px;font-family:monospace">${quoteRef}</div></div></div>
+<div style="padding:24px 32px;display:grid;grid-template-columns:1fr 1fr;gap:24px;border-bottom:1px solid #ede8e0" class="info-grid"><div>
+  <div style="font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.12em;font-weight:700;margin-bottom:6px">Prepared For</div>
+  <div style="font-family:'Playfair Display',serif;font-size:20px;font-weight:600;color:#1c1814;margin-bottom:6px">${clientName}</div>
+  ${clientPhone?`<div style="font-size:12px;color:#7a6e62;margin-bottom:3px">📞 ${clientPhone}</div>`:""}
+  ${clientEmail?`<div style="font-size:12px;color:#7a6e62;margin-bottom:3px">✉️ ${clientEmail}</div>`:""}
+  ${clientAddress?`<div style="font-size:12px;color:#7a6e62;">📍 ${clientAddress}</div>`:""}
+</div><div style="text-align:right"><div style="margin-bottom:6px"><span style="font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.1em">Date: </span><span style="font-size:13px;color:#1c1814;font-weight:600">${fmtDate(quoteDate)}</span></div><div style="margin-bottom:6px"><span style="font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.1em">Prepared By: </span><span style="font-size:13px;color:#1c1814;font-weight:600">${preparedBy||"Lavishome Team"}</span></div><div style="background:#fff8e8;border:1px solid #e8c27a44;border-radius:8px;padding:6px 12px;display:inline-block;margin-top:2px"><span style="font-size:11px;color:#8a6820;font-weight:700">⏱ Valid until ${validUntil} or while stocks last</span></div></div></div>
 <div style="padding:0 32px"><table><thead><tr style="border-bottom:2px solid #ddd4c4"><th style="padding:12px;text-align:left;font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.1em;font-weight:700;width:100px">Photo</th><th style="padding:12px;text-align:left;font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.1em;font-weight:700">Product</th><th style="padding:12px;text-align:center;font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.1em;font-weight:700;width:60px">Qty</th><th style="padding:12px;text-align:right;font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.1em;font-weight:700;width:110px">Unit Price</th><th style="padding:12px;text-align:right;font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.1em;font-weight:700;width:110px">Total</th></tr></thead><tbody>${productRows}</tbody></table></div>
 <div style="padding:20px 32px;border-top:2px solid #ede8e0;margin-top:6px"><table style="max-width:320px;margin-left:auto"><tbody><tr><td style="padding:7px 12px;color:#7a6e62;font-size:13px">Subtotal</td><td style="padding:7px 12px;text-align:right;font-size:13px;font-weight:600;color:#1c1814">${fmt(subtotal)}</td></tr>${discountRow}<tr style="border-top:2px solid #ddd4c4"><td style="padding:12px;font-family:'Playfair Display',serif;font-size:16px;font-weight:700;color:#6a4e10">Total (CAD)</td><td style="padding:12px;text-align:right;font-family:'Playfair Display',serif;font-size:20px;font-weight:700;color:#6a4e10">${fmt(total)}</td></tr></tbody></table></div>
 ${notes?`<div style="padding:18px 32px;border-top:1px solid #ede8e0;background:#faf8f5"><div style="font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.12em;font-weight:700;margin-bottom:6px">Notes</div><div style="font-size:13px;color:#1c1814;line-height:1.7">${notes}</div></div>`:""}
 <div style="padding:18px 32px;border-top:1px solid #ede8e0;background:#faf8f5"><div style="font-size:10px;color:#7a6e62;text-transform:uppercase;letter-spacing:0.12em;font-weight:700;margin-bottom:6px">Terms &amp; Conditions</div><div style="font-size:12px;color:#7a6e62;line-height:1.7">• This quote is valid for 7 days from the date of issue or while stocks last, whichever comes first.<br>• Prices are in Canadian Dollars (CAD) and do not include applicable taxes.<br>• Delivery timelines and terms to be confirmed upon order confirmation.<br>• A deposit may be required to confirm your order.</div></div>
-<div style="background:#6a4e10;padding:20px 32px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px"><div style="font-family:'Playfair Display',serif;font-size:15px;color:#fff;font-weight:600">Lavishome</div><div style="font-size:11px;color:#e8c27a;text-align:center">405 Britannia Rd E, Unit 111, Mississauga, ON L4Z 3E6</div><div style="font-size:11px;color:#e8c27a">Toronto: +1 (437) 984-8055 &nbsp;|&nbsp; Montreal: +1 (514) 577-1029</div></div>
+<div style="background:#ba5f33;padding:20px 32px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px"><div style="font-family:'Playfair Display',serif;font-size:15px;color:#fff;font-weight:600">Lavishome</div><div style="font-size:11px;color:#e8c27a;text-align:center">405 Britannia Rd E, Unit 111, Mississauga, ON L4Z 3E6</div><div style="font-size:11px;color:#e8c27a">Toronto: +1 (437) 984-8055 &nbsp;|&nbsp; Montreal: +1 (514) 577-1029</div></div>
 </div></body></html>`;
   const w=window.open("","_blank");
   w.document.write(html);
@@ -200,13 +339,13 @@ function ProductDetailModal({product,onClose,onSelectForQuote,isSelected}){
             <div style={{fontSize:10,color:G.muted,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5}}>Selling Price</div>
             <div style={{fontSize:isMobile?20:24,fontWeight:700,color:G.goldL,fontFamily:"'Playfair Display',serif"}}>${product.price.toLocaleString("en-CA",{minimumFractionDigits:2})}</div>
           </div>
-          <div style={{background:isOut?G.danger+"10":isLow?G.warn+"10":G.ok+"10",border:`1px solid ${isOut?G.danger:isLow?G.warn:G.ok}44`,borderRadius:10,padding:"12px 14px"}}>
-            <div style={{fontSize:10,color:G.muted,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5}}>Availability</div>
-            <div style={{fontSize:isMobile?15:18,fontWeight:700,color:isOut?G.danger:isLow?G.warn:G.ok,fontFamily:"'Playfair Display',serif"}}>{isOut?"Out of Stock":isLow?`Only ${product.stock} left`:`${product.stock} in Stock`}</div>
+          <div style={{background:product.cat===SERVICE_CAT?"#ba5f3310":isOut?G.danger+"10":isLow?G.warn+"10":G.ok+"10",border:`1px solid ${product.cat===SERVICE_CAT?"#ba5f3344":isOut?G.danger:isLow?G.warn:G.ok}44`,borderRadius:10,padding:"12px 14px"}}>
+            <div style={{fontSize:10,color:G.muted,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5}}>{product.cat===SERVICE_CAT?"Type":"Availability"}</div>
+            <div style={{fontSize:isMobile?15:18,fontWeight:700,color:product.cat===SERVICE_CAT?"#ba5f33":isOut?G.danger:isLow?G.warn:G.ok,fontFamily:"'Playfair Display',serif"}}>{product.cat===SERVICE_CAT?"🔧 Service / Add-on":isOut?"Out of Stock":isLow?`Only ${product.stock} left`:`${product.stock} in Stock`}</div>
           </div>
         </div>
         {product.desc&&<div style={{marginBottom:14}}><div style={{fontSize:10,color:G.muted,textTransform:"uppercase",letterSpacing:"0.1em",fontWeight:700,marginBottom:5}}>Description</div><div style={{fontSize:13,color:G.cream,lineHeight:1.7}}>{product.desc}</div></div>}
-        {hasDims&&<div style={{background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:10,padding:"12px 14px",marginBottom:18}}>
+        {hasDims&&product.cat!==SERVICE_CAT&&<div style={{background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:10,padding:"12px 14px",marginBottom:18}}>
           <div style={{fontSize:10,color:G.muted,textTransform:"uppercase",letterSpacing:"0.1em",fontWeight:700,marginBottom:10}}>↔ Dimensions</div>
           <div style={{display:"flex",gap:10}}>
             {[["Width",d.w],["Height",d.h],["Depth",d.d]].map(([l,v])=>v?(
@@ -231,10 +370,13 @@ function ProductDetailModal({product,onClose,onSelectForQuote,isSelected}){
 // ══════════════════════════════════════════════════════════════════════════
 //  QUOTE BUILDER MODAL
 // ══════════════════════════════════════════════════════════════════════════
-function QuoteBuilderModal({selectedProds,onRemove,onUpdateQty,onClose,onGenerate}){
+function QuoteBuilderModal({selectedProds,onRemove,onUpdateQty,onClose,onGenerate,userProfile}){
   const isMobile=useIsMobile();
   const [clientName,setClientName]=useState("");
-  const [preparedBy,setPreparedBy]=useState("");
+  const [clientPhone,setClientPhone]=useState("");
+  const [clientEmail,setClientEmail]=useState("");
+  const [clientAddress,setClientAddress]=useState("");
+  const [preparedBy,setPreparedBy]=useState(userProfile?.displayName||"");
   const [notes,setNotes]=useState("");
   const [discountType,setDiscountType]=useState("%");
   const [discountValue,setDiscountValue]=useState("");
@@ -242,7 +384,7 @@ function QuoteBuilderModal({selectedProds,onRemove,onUpdateQty,onClose,onGenerat
   const subtotal=selectedProds.reduce((s,p)=>s+p.price*(p.qty||1),0);
   const discAmt=discountType==="%"?subtotal*(parseFloat(discountValue)||0)/100:parseFloat(discountValue)||0;
   const total=Math.max(0,subtotal-discAmt);
-  function handleGenerate(){if(!clientName.trim())return alert("Please enter the client name.");onGenerate({clientName,preparedBy,notes,discountType,discountValue,quoteDate});}
+  function handleGenerate(){if(!clientName.trim())return alert("Please enter the client name.");onGenerate({clientName,clientPhone,clientEmail,clientAddress,preparedBy,notes,discountType,discountValue,quoteDate});}
   return(
     <ModalWrap onClose={onClose} maxW={600}>
       <div className="lh-modal-pad" style={{padding:"22px 24px"}}>
@@ -272,6 +414,11 @@ function QuoteBuilderModal({selectedProds,onRemove,onUpdateQty,onClose,onGenerat
           <div><label style={lbl}>Client Name *</label><input style={inp} value={clientName} onChange={e=>setClientName(e.target.value)} placeholder="e.g. Sarah Thompson"/></div>
           <div><label style={lbl}>Prepared By</label><input style={inp} value={preparedBy} onChange={e=>setPreparedBy(e.target.value)} placeholder="Your name"/></div>
         </div>
+        <div className="lh-grid2" style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+          <div><label style={lbl}>Client Phone</label><input style={inp} value={clientPhone} onChange={e=>setClientPhone(e.target.value)} placeholder="e.g. +1 (416) 555-0100" type="tel"/></div>
+          <div><label style={lbl}>Client Email</label><input style={inp} value={clientEmail} onChange={e=>setClientEmail(e.target.value)} placeholder="e.g. sarah@email.com" type="email"/></div>
+        </div>
+        <div style={{marginBottom:10}}><label style={lbl}>Client Address</label><input style={inp} value={clientAddress} onChange={e=>setClientAddress(e.target.value)} placeholder="e.g. 123 Main St, Toronto, ON M5V 1A1"/></div>
         <div style={{marginBottom:10}}><label style={lbl}>Quote Date</label><input style={inp} type="date" value={quoteDate} onChange={e=>setQuoteDate(e.target.value)}/></div>
         <div style={{background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:10,padding:"12px 14px",marginBottom:10}}>
           <div style={{fontSize:10,color:G.gold,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:10}}>🏷 Discount (optional)</div>
@@ -302,7 +449,7 @@ function QuoteBuilderModal({selectedProds,onRemove,onUpdateQty,onClose,onGenerat
 // ══════════════════════════════════════════════════════════════════════════
 //  CATALOG TAB
 // ══════════════════════════════════════════════════════════════════════════
-function CatalogTab({prods,onSaveQuote}){
+function CatalogTab({prods,onSaveQuote,userProfile}){
   const isMobile=useIsMobile();
   const [search,setSearch]=useState("");
   const [cat,setCat]=useState("All");
@@ -328,9 +475,14 @@ function CatalogTab({prods,onSaveQuote}){
     const total=Math.max(0,subtotal-discAmt);
     generateQuotePage(quoteItems,info,ref);
     onSaveQuote({
-      id:gid(),ref,clientName:info.clientName,preparedBy:info.preparedBy||"Lavishome Team",
-      quoteDate:info.quoteDate,notes:info.notes||"",discountType:info.discountType,
-      discountValue:info.discountValue||"",
+      id:gid(),ref,
+      clientName:info.clientName,
+      clientPhone:info.clientPhone||"",
+      clientEmail:info.clientEmail||"",
+      clientAddress:info.clientAddress||"",
+      preparedBy:info.preparedBy||"Lavishome Team",
+      quoteDate:info.quoteDate,notes:info.notes||"",
+      discountType:info.discountType,discountValue:info.discountValue||"",
       products:quoteItems.map(p=>({id:p.id,code:p.code,name:p.name,cat:p.cat,price:p.price,desc:p.desc||"",dims:p.dims||{w:"",h:"",d:""},photo:p.photo||null,stock:p.stock,qty:p.qty||1})),
       subtotal,discAmt,total,status:"Pending",createdAt:Date.now(),
     });
@@ -340,7 +492,7 @@ function CatalogTab({prods,onSaveQuote}){
     <div>
       <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap",alignItems:"center"}}>
         <div style={{flex:1,minWidth:160,position:"relative"}}><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search products…" style={{...inp,paddingLeft:34}}/><span style={{position:"absolute",left:11,top:"50%",transform:"translateY(-50%)",color:G.muted,fontSize:14,pointerEvents:"none"}}>🔍</span></div>
-        <select value={cat} onChange={e=>setCat(e.target.value)} style={{...inp,width:"auto",minWidth:140,cursor:"pointer"}}>{ALL_CATS.map(c=><option key={c} value={c}>{c}</option>)}</select>
+        <select value={cat} onChange={e=>setCat(e.target.value)} style={{...inp,width:"auto",minWidth:140,cursor:"pointer"}}>{ALL_CATS_CAT.map(c=><option key={c} value={c}>{c}</option>)}</select>
         {selectedIds.length>0&&<button onClick={()=>setShowQuoteBuilder(true)} style={{background:G.goldL,border:"none",color:"#fff",borderRadius:7,padding:"9px 16px",fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>📋 Create Quote ({selectedIds.length})</button>}
       </div>
       <div style={{fontSize:12,color:G.muted,marginBottom:14}}>✓ Tap products to select for a quote. <strong style={{color:G.cream}}>{filtered.length}</strong> shown.</div>
@@ -365,10 +517,13 @@ function CatalogTab({prods,onSaveQuote}){
                 <div style={{fontSize:9,color:G.gold,fontWeight:700,letterSpacing:"0.14em",textTransform:"uppercase",marginBottom:3}}>{p.cat}</div>
                 <div style={{fontSize:isMobile?13:14,fontWeight:600,color:G.cream,fontFamily:"'Playfair Display',serif",lineHeight:1.3,marginBottom:4}}>{p.name}</div>
                 {p.desc&&<div style={{fontSize:11,color:G.muted,marginBottom:8,lineHeight:1.5}}>{p.desc}</div>}
-                {hd&&<div style={{display:"inline-flex",alignItems:"center",gap:5,background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:5,padding:"2px 8px",marginBottom:10}}><span style={{fontSize:9,color:G.muted,textTransform:"uppercase",letterSpacing:"0.1em",fontWeight:700}}>W×H×D</span><span style={{fontSize:11,color:G.gold,fontFamily:"monospace",fontWeight:600}}>{d.w||"–"}×{d.h||"–"}×{d.d||"–"} cm</span></div>}
+                {hd&&p.cat!==SERVICE_CAT&&<div style={{display:"inline-flex",alignItems:"center",gap:5,background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:5,padding:"2px 8px",marginBottom:10}}><span style={{fontSize:9,color:G.muted,textTransform:"uppercase",letterSpacing:"0.1em",fontWeight:700}}>W×H×D</span><span style={{fontSize:11,color:G.gold,fontFamily:"monospace",fontWeight:600}}>{d.w||"–"}×{d.h||"–"}×{d.d||"–"} cm</span></div>}
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
                   <div style={{fontSize:isMobile?16:18,fontWeight:700,color:G.goldL,fontFamily:"'Playfair Display',serif"}}>${p.price.toLocaleString("en-CA",{minimumFractionDigits:2})}</div>
-                  <span style={{padding:"3px 9px",borderRadius:999,fontSize:9,fontWeight:700,textTransform:"uppercase",background:(isOut?G.danger:isLow?G.warn:G.ok)+"18",color:isOut?G.danger:isLow?G.warn:G.ok,border:`1px solid ${(isOut?G.danger:isLow?G.warn:G.ok)}44`}}>{isOut?"Out of Stock":isLow?`Only ${p.stock} left`:`${p.stock} available`}</span>
+                  {p.cat===SERVICE_CAT
+                    ?<span style={{padding:"3px 9px",borderRadius:999,fontSize:9,fontWeight:700,textTransform:"uppercase",background:"#ba5f3318",color:"#ba5f33",border:"1px solid #ba5f3344"}}>🔧 Service</span>
+                    :<span style={{padding:"3px 9px",borderRadius:999,fontSize:9,fontWeight:700,textTransform:"uppercase",background:(isOut?G.danger:isLow?G.warn:G.ok)+"18",color:isOut?G.danger:isLow?G.warn:G.ok,border:`1px solid ${(isOut?G.danger:isLow?G.warn:G.ok)}44`}}>{isOut?"Out of Stock":isLow?`Only ${p.stock} left`:`${p.stock} available`}</span>
+                  }
                 </div>
                 <div style={{display:"flex",gap:8}}>
                   <button onClick={()=>setDetailProd(p)} style={{flex:1,background:"#fff",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:7,padding:"9px 6px",fontSize:isMobile?12:11,fontWeight:600,cursor:"pointer"}}>View Details</button>
@@ -387,19 +542,192 @@ function CatalogTab({prods,onSaveQuote}){
         </div>
       )}
       {detailProd&&<ProductDetailModal product={detailProd} onClose={()=>setDetailProd(null)} onSelectForQuote={toggleSelect} isSelected={selectedIds.includes(detailProd.id)}/>}
-      {showQuoteBuilder&&<QuoteBuilderModal selectedProds={quoteItems} onRemove={removeFromQuote} onUpdateQty={updateQty} onClose={()=>setShowQuoteBuilder(false)} onGenerate={handleGenerate}/>}
+      {showQuoteBuilder&&<QuoteBuilderModal selectedProds={quoteItems} onRemove={removeFromQuote} onUpdateQty={updateQty} onClose={()=>setShowQuoteBuilder(false)} onGenerate={handleGenerate} userProfile={userProfile}/>}
     </div>
+  );
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════
+//  ACCEPT QUOTE MODAL
+//  Shows editable quantities + prices, cash/credit selector, confirm button
+// ══════════════════════════════════════════════════════════════════════════
+function AcceptQuoteModal({quote, onConfirm, onClose}){
+  const isMobile=useIsMobile();
+  const [payType,setPayType]=useState("Sale – Cash");
+  const [items,setItems]=useState(
+    quote.products.map(p=>({...p, confirmedQty: p.qty||1, confirmedPrice: p.price}))
+  );
+
+  function updateItem(id, field, val){
+    setItems(prev=>prev.map(it=>it.id===id?{...it,[field]:parseFloat(val)||0}:it));
+  }
+
+  const total=items.reduce((s,it)=>s+it.confirmedPrice*it.confirmedQty,0);
+  const discAmt=quote.discountType==="%"?total*(parseFloat(quote.discountValue)||0)/100:parseFloat(quote.discountValue)||0;
+  const finalTotal=Math.max(0,total-discAmt);
+
+  function handleConfirm(){
+    onConfirm({payType, items, finalTotal});
+  }
+
+  return(
+    <ModalWrap onClose={onClose} maxW={580}>
+      <div className="lh-modal-pad" style={{padding:"24px 26px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:18}}>
+          <div>
+            <h2 style={{color:G.goldL,fontFamily:"'Playfair Display',serif",fontSize:isMobile?18:21,fontWeight:700}}>Confirm Acceptance</h2>
+            <div style={{fontSize:12,color:G.muted,marginTop:3}}>Client: <strong style={{color:G.cream}}>{quote.clientName}</strong> · {quote.ref}</div>
+          </div>
+          <button onClick={onClose} style={{background:"none",border:"none",color:G.muted,fontSize:24,cursor:"pointer"}}>×</button>
+        </div>
+
+        {/* Info banner */}
+        <div style={{background:G.ok+"10",border:,borderRadius:10,padding:"10px 14px",marginBottom:18,fontSize:12,color:G.ok,fontWeight:600}}>
+          ✅ Confirming this will automatically deduct stock and create a finance entry.
+        </div>
+
+        {/* Payment type */}
+        <div style={{marginBottom:18}}>
+          <label style={lbl}>Payment Type</label>
+          <div style={{display:"flex",gap:10}}>
+            {["Sale – Cash","Sale – Credit"].map(t=>(
+              <button key={t} onClick={()=>setPayType(t)} style={{flex:1,background:payType===t?G.goldL:"#fff",border:,color:payType===t?"#fff":G.muted,borderRadius:8,padding:"10px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                {t==="Sale – Cash"?"💰 Cash Payment":"📋 Credit (Pay Later)"}
+              </button>
+            ))}
+          </div>
+          {payType==="Sale – Credit"&&<div style={{fontSize:11,color:G.warn,marginTop:6}}>⚠️ Credit sale — client will owe this amount. Record payment later in Finance.</div>}
+        </div>
+
+        {/* Editable product list */}
+        <div style={{background:G.surf2,border:,borderRadius:10,padding:"14px 16px",marginBottom:18}}>
+          <div style={{fontSize:10,color:G.gold,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:12}}>Confirm Products & Quantities</div>
+          <div style={{fontSize:11,color:G.muted,marginBottom:10}}>Adjust if client changed their mind on quantities or negotiated a different price.</div>
+          {items.map(it=>(
+            <div key={it.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 0",borderBottom:}}>
+              {/* Thumb */}
+              <div style={{width:40,height:40,borderRadius:7,overflow:"hidden",background:G.surf,border:,flexShrink:0}}>
+                {it.photo?<img src={it.photo} style={{width:"100%",height:"100%",objectFit:"cover"}} alt={it.name}/>:<div style={{width:"100%",height:"100%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>🏠</div>}
+              </div>
+              {/* Name */}
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:12,fontWeight:600,color:G.cream,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{it.name}</div>
+                <div style={{fontSize:10,color:G.muted}}>{it.cat}</div>
+              </div>
+              {/* Qty */}
+              <div style={{display:"flex",flexDirection:"column",gap:2,alignItems:"center"}}>
+                <div style={{fontSize:9,color:G.muted,textTransform:"uppercase",letterSpacing:"0.08em"}}>Qty</div>
+                <input type="number" value={it.confirmedQty} min="1"
+                  onChange={e=>updateItem(it.id,"confirmedQty",e.target.value)}
+                  style={{...inp,width:60,textAlign:"center",padding:"5px 8px",fontSize:13,fontWeight:700}}/>
+              </div>
+              {/* Price */}
+              <div style={{display:"flex",flexDirection:"column",gap:2,alignItems:"center"}}>
+                <div style={{fontSize:9,color:G.muted,textTransform:"uppercase",letterSpacing:"0.08em"}}>Unit Price</div>
+                <input type="number" value={it.confirmedPrice} min="0"
+                  onChange={e=>updateItem(it.id,"confirmedPrice",e.target.value)}
+                  style={{...inp,width:90,textAlign:"center",padding:"5px 8px",fontSize:13,fontWeight:700,color:G.goldL}}/>
+              </div>
+              {/* Line total */}
+              <div style={{minWidth:80,textAlign:"right",fontSize:13,fontWeight:700,color:G.goldL}}>{fmt(it.confirmedPrice*it.confirmedQty)}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Final total */}
+        <div style={{background:G.surf2,border:,borderRadius:10,padding:"12px 16px",marginBottom:22}}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontSize:13,color:G.muted}}>Subtotal</span><span style={{fontSize:13,fontWeight:600,color:G.cream}}>{fmt(total)}</span></div>
+          {discAmt>0&&<div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontSize:13,color:G.warn}}>Discount</span><span style={{fontSize:13,fontWeight:600,color:G.warn}}>−{fmt(discAmt)}</span></div>}
+          <div style={{display:"flex",justifyContent:"space-between",borderTop:,paddingTop:10,marginTop:6}}>
+            <span style={{fontSize:15,fontWeight:700,color:G.goldL,fontFamily:"'Playfair Display',serif"}}>Final Total (CAD)</span>
+            <span style={{fontSize:isMobile?18:20,fontWeight:700,color:G.goldL,fontFamily:"'Playfair Display',serif"}}>{fmt(finalTotal)}</span>
+          </div>
+        </div>
+
+        {/* Confirm buttons */}
+        <div style={{display:"flex",gap:10}}>
+          <button onClick={onClose} style={{flex:1,background:"#fff",border:,color:G.muted,borderRadius:8,padding:"11px",fontSize:13,fontWeight:600,cursor:"pointer"}}>Cancel</button>
+          <button onClick={handleConfirm} style={{flex:2,background:G.ok,border:"none",color:"#fff",borderRadius:8,padding:"11px",fontSize:13,fontWeight:700,cursor:"pointer"}}>✅ Confirm Acceptance</button>
+        </div>
+      </div>
+    </ModalWrap>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  CLIENT HISTORY MODAL
+// ══════════════════════════════════════════════════════════════════════════
+function ClientHistoryModal({clientName, allQuotes, onClose, onReopen}){
+  const isMobile = useIsMobile();
+  const clientQuotes = [...allQuotes]
+    .filter(q => q.clientName.toLowerCase() === clientName.toLowerCase())
+    .sort((a,b) => b.createdAt - a.createdAt);
+
+  const totalSpent = clientQuotes
+    .filter(q => q.status === "Accepted")
+    .reduce((s,q) => s + q.total, 0);
+
+  return(
+    <ModalWrap onClose={onClose} maxW={620}>
+      <div className="lh-modal-pad" style={{padding:"24px 26px"}}>
+        {/* Header */}
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:20}}>
+          <div>
+            <h2 style={{color:G.goldL,fontFamily:"'Playfair Display',serif",fontSize:isMobile?18:22,fontWeight:700}}>{clientName}</h2>
+            <div style={{fontSize:12,color:G.muted,marginTop:4}}>{clientQuotes.length} quote{clientQuotes.length!==1?"s":""} · Total accepted: <strong style={{color:G.ok}}>{fmt(totalSpent)}</strong></div>
+          </div>
+          <button onClick={onClose} style={{background:"none",border:"none",color:G.muted,fontSize:24,cursor:"pointer",lineHeight:1}}>×</button>
+        </div>
+
+        {/* Quote list */}
+        {clientQuotes.length===0
+          ?<div style={{textAlign:"center",padding:40,color:G.muted}}>No quotes found for this client.</div>
+          :<div style={{display:"flex",flexDirection:"column",gap:10}}>
+            {clientQuotes.map(q=>{
+              const sm = STATUS_META[q.status]||STATUS_META.Pending;
+              const exp = getExpiryStatus(q.quoteDate, q.status);
+              return(
+                <div key={q.id} style={{background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:10,padding:"12px 16px"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,flexWrap:"wrap",gap:8}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                      <span style={{fontFamily:"monospace",fontWeight:700,color:G.gold,fontSize:12}}>{q.ref}</span>
+                      <span style={{fontSize:11,color:G.muted}}>📅 {fmtDate(q.quoteDate)}</span>
+                      <span style={{padding:"2px 8px",borderRadius:999,fontSize:10,fontWeight:700,background:sm.bg,color:sm.color,border:`1px solid ${sm.border}`}}>{sm.label}</span>
+                      {exp&&<span style={{padding:"2px 8px",borderRadius:999,fontSize:10,fontWeight:700,background:exp.bg,color:exp.color,border:`1px solid ${exp.border}`}}>{exp.label}</span>}
+                    </div>
+                    <div style={{display:"flex",alignItems:"center",gap:10}}>
+                      <span style={{fontSize:15,fontWeight:700,color:G.goldL,fontFamily:"'Playfair Display',serif"}}>{fmt(q.total)}</span>
+                      <button onClick={()=>onReopen(q)} style={{background:G.goldL,border:"none",color:"#fff",borderRadius:6,padding:"5px 12px",fontSize:11,fontWeight:700,cursor:"pointer"}}>🖨 Open</button>
+                    </div>
+                  </div>
+                  <div style={{fontSize:11,color:G.muted,lineHeight:1.5}}>
+                    {q.products.map(p=>p.name+(p.qty>1?" ×"+p.qty:"")).join(", ")}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        }
+      </div>
+    </ModalWrap>
   );
 }
 
 // ══════════════════════════════════════════════════════════════════════════
 //  QUOTE HISTORY TAB
 // ══════════════════════════════════════════════════════════════════════════
-function QuoteHistoryTab({quotes,onUpdateStatus,onDelete}){
+function QuoteHistoryTab({quotes,archivedQuotes,onUpdateStatus,onArchiveQuote,onRestoreQuote,onPermDeleteQuote,onAcceptQuote,onUndoAcceptance,onDuplicateQuote}){
   const isMobile=useIsMobile();
   const [search,setSearch]=useState("");
   const [statusF,setStatusF]=useState("All");
   const [delConfirm,setDelConfirm]=useState(null);
+  const [acceptQuote,setAcceptQuote]=useState(null);
+  const [undoConfirm,setUndoConfirm]=useState(null);
+  const [showArchive,setShowArchive]=useState(false);
+  const [permDelId,setPermDelId]=useState(null);
+  const [clientHistory,setClientHistory]=useState(null); // client name string
+  const [duplicating,setDuplicating]=useState(null);     // quote to duplicate
   const filtered=useMemo(()=>[...quotes].sort((a,b)=>b.createdAt-a.createdAt).filter(q=>{
     const ms=(q.clientName+q.ref+(q.preparedBy||"")).toLowerCase().includes(search.toLowerCase());
     const mf=statusF==="All"||q.status===statusF;
@@ -409,7 +737,7 @@ function QuoteHistoryTab({quotes,onUpdateStatus,onDelete}){
   const valAccepted=quotes.filter(q=>q.status==="Accepted").reduce((s,q)=>s+q.total,0);
   const countPending=quotes.filter(q=>q.status==="Pending").length;
   const countAccepted=quotes.filter(q=>q.status==="Accepted").length;
-  function reopen(q){generateQuotePage(q.products,{clientName:q.clientName,preparedBy:q.preparedBy,notes:q.notes,discountType:q.discountType,discountValue:q.discountValue,quoteDate:q.quoteDate},q.ref);}
+  function reopen(q){generateQuotePage(q.products,{clientName:q.clientName,clientPhone:q.clientPhone||"",clientEmail:q.clientEmail||"",clientAddress:q.clientAddress||"",preparedBy:q.preparedBy,notes:q.notes,discountType:q.discountType,discountValue:q.discountValue,quoteDate:q.quoteDate},q.ref);}
   function exportCSV(){
     const h=["Ref","Client","Prepared By","Date","Products","Subtotal","Discount","Total","Status","Notes"];
     const rows=filtered.map(q=>[q.ref,q.clientName,q.preparedBy||"",q.quoteDate,q.products.map(p=>`${p.name} ×${p.qty}`).join(" | "),q.subtotal.toFixed(2),q.discAmt.toFixed(2),q.total.toFixed(2),q.status,q.notes||""]);
@@ -442,8 +770,15 @@ function QuoteHistoryTab({quotes,onUpdateStatus,onDelete}){
               <div className="lh-q-row" style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:16,marginBottom:14}}>
                 <div style={{flex:1,minWidth:0}}>
                   <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4,flexWrap:"wrap"}}>
-                    <div style={{fontSize:isMobile?15:17,fontWeight:700,color:G.cream,fontFamily:"'Playfair Display',serif"}}>{q.clientName}</div>
+                    {/* Client name — clickable to open history */}
+                    <div
+                      onClick={()=>setClientHistory(q.clientName)}
+                      style={{fontSize:isMobile?15:17,fontWeight:700,color:G.goldL,fontFamily:"'Playfair Display',serif",cursor:"pointer",textDecoration:"underline",textDecorationStyle:"dotted",textUnderlineOffset:3}}>
+                      {q.clientName}
+                    </div>
                     <span style={{padding:"3px 10px",borderRadius:999,fontSize:10,fontWeight:700,background:sm.bg,color:sm.color,border:`1px solid ${sm.border}`}}>{sm.label}</span>
+                    {/* Expiry flag */}
+                    {exp&&<span style={{padding:"3px 10px",borderRadius:999,fontSize:10,fontWeight:700,background:exp.bg,color:exp.color,border:`1px solid ${exp.border}`}}>{exp.label}</span>}
                   </div>
                   <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
                     <div style={{fontSize:11,color:G.muted}}><span style={{fontFamily:"monospace",fontWeight:700,color:G.gold}}>{q.ref}</span></div>
@@ -451,6 +786,11 @@ function QuoteHistoryTab({quotes,onUpdateStatus,onDelete}){
                     {q.preparedBy&&<div style={{fontSize:11,color:G.muted}}>👤 {q.preparedBy}</div>}
                     <div style={{fontSize:11,color:G.muted}}>🕐 {fmtTs(q.createdAt)}</div>
                   </div>
+                  {(q.clientPhone||q.clientEmail||q.clientAddress)&&<div style={{display:"flex",gap:12,flexWrap:"wrap",marginTop:6}}>
+                    {q.clientPhone&&<div style={{fontSize:11,color:G.muted}}>📞 {q.clientPhone}</div>}
+                    {q.clientEmail&&<div style={{fontSize:11,color:G.muted}}>✉️ {q.clientEmail}</div>}
+                    {q.clientAddress&&<div style={{fontSize:11,color:G.muted}}>📍 {q.clientAddress}</div>}
+                  </div>}
                 </div>
                 <div style={{textAlign:"right",flexShrink:0}}>
                   <div style={{fontSize:isMobile?18:22,fontWeight:700,color:G.goldL,fontFamily:"'Playfair Display',serif"}}>{fmt(q.total)}</div>
@@ -473,16 +813,104 @@ function QuoteHistoryTab({quotes,onUpdateStatus,onDelete}){
               </div>
               <div className="lh-q-actions" style={{display:"flex",gap:8,flexWrap:"wrap"}}>
                 <button onClick={()=>reopen(q)} style={{background:G.goldL,border:"none",color:"#fff",borderRadius:7,padding:"8px 16px",fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>🖨 Re-open Quote</button>
-                {q.status!=="Accepted"&&<button onClick={()=>onUpdateStatus(q.id,"Accepted")} style={{background:G.ok+"18",border:`1px solid ${G.ok}44`,color:G.ok,borderRadius:7,padding:"8px 14px",fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>✅ Mark Accepted</button>}
-                {q.status!=="Declined"&&<button onClick={()=>onUpdateStatus(q.id,"Declined")} style={{background:G.muted+"18",border:`1px solid ${G.muted}44`,color:G.muted,borderRadius:7,padding:"8px 14px",fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>❌ Mark Declined</button>}
-                {q.status!=="Pending"&&<button onClick={()=>onUpdateStatus(q.id,"Pending")} style={{background:G.warn+"18",border:`1px solid ${G.warn}44`,color:G.warn,borderRadius:7,padding:"8px 14px",fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>⏳ Mark Pending</button>}
-                <button onClick={()=>setDelConfirm(q.id)} style={{marginLeft:"auto",background:G.danger+"10",border:`1px solid ${G.danger}33`,color:G.danger,borderRadius:7,padding:"8px 12px",fontSize:11,fontWeight:600,cursor:"pointer"}}>Delete</button>
+                <button onClick={()=>onDuplicateQuote(q)} style={{background:G.info+"18",border:`1px solid ${G.info}44`,color:G.info,borderRadius:7,padding:"8px 14px",fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>📋 Duplicate</button>
+                {/* Accept — opens modal with editable qty/price/payment type */}
+                {q.status!=="Accepted"&&<button onClick={()=>setAcceptQuote(q)} style={{background:G.ok,border:"none",color:"#fff",borderRadius:7,padding:"8px 14px",fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>✅ Mark Accepted</button>}
+                {/* Undo — only on accepted quotes */}
+                {q.status==="Accepted"&&<button onClick={()=>setUndoConfirm(q)} style={{background:G.warn+"18",border:`1px solid ${G.warn}44`,color:G.warn,borderRadius:7,padding:"8px 14px",fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>↩️ Undo Acceptance</button>}
+                {q.status!=="Declined"&&q.status!=="Accepted"&&<button onClick={()=>onUpdateStatus(q.id,"Declined")} style={{background:G.muted+"18",border:`1px solid ${G.muted}44`,color:G.muted,borderRadius:7,padding:"8px 14px",fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>❌ Mark Declined</button>}
+                {q.status==="Declined"&&<button onClick={()=>onUpdateStatus(q.id,"Pending")} style={{background:G.warn+"18",border:`1px solid ${G.warn}44`,color:G.warn,borderRadius:7,padding:"8px 14px",fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>⏳ Mark Pending</button>}
+                <button onClick={()=>setDelConfirm(q.id)} style={{marginLeft:"auto",background:G.warn+"10",border:`1px solid ${G.warn}33`,color:G.warn,borderRadius:7,padding:"8px 12px",fontSize:11,fontWeight:600,cursor:"pointer"}}>🗂️ Archive</button>
               </div>
             </div>
           );
         })}
       </div>
-      {delConfirm&&<ModalWrap onClose={()=>setDelConfirm(null)} maxW={360}><div style={{padding:28,textAlign:"center"}}><div style={{fontSize:36,marginBottom:12}}>🗑️</div><h3 style={{color:G.cream,fontFamily:"'Playfair Display',serif",marginBottom:8,fontSize:18}}>Delete Quote?</h3><p style={{color:G.muted,fontSize:13,marginBottom:22}}>This will permanently remove the quote from your history.</p><div style={{display:"flex",gap:10,justifyContent:"center"}}><button onClick={()=>setDelConfirm(null)} style={{background:"#fff",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:7,padding:"10px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>Cancel</button><button onClick={()=>{onDelete(delConfirm);setDelConfirm(null);}} style={{background:G.danger,border:"none",color:"#fff",borderRadius:7,padding:"10px 18px",fontSize:13,fontWeight:700,cursor:"pointer"}}>Delete</button></div></div></ModalWrap>}
+      {/* Archive section */}
+      <div style={{marginTop:28}}>
+        <button onClick={()=>setShowArchive(s=>!s)} style={{background:"none",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:8,padding:"8px 16px",fontSize:12,fontWeight:600,cursor:"pointer",display:"flex",alignItems:"center",gap:8}}>
+          <span>🗂️ Archived Quotes</span>
+          <span style={{background:G.surf2,borderRadius:999,padding:"1px 8px",fontSize:11,fontWeight:700,color:archivedQuotes.length>0?G.warn:G.muted}}>{archivedQuotes.length}</span>
+          <span style={{fontSize:11}}>{showArchive?"▲":"▼"}</span>
+        </button>
+        {showArchive&&<div style={{marginTop:12}}>
+          {archivedQuotes.length===0
+            ?<div style={{background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:10,padding:"24px",textAlign:"center",color:G.muted,fontSize:13}}>No archived quotes</div>
+            :<div style={{display:"flex",flexDirection:"column",gap:10}}>
+              {archivedQuotes.map(q=>(
+                <div key={q.id} style={{background:G.surf,border:`1px solid ${G.bdr}`,borderRadius:12,padding:"14px 18px",opacity:0.8}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,flexWrap:"wrap",gap:8}}>
+                    <div>
+                      <span style={{fontSize:14,fontWeight:700,color:G.cream,fontFamily:"'Playfair Display',serif"}}>{q.clientName}</span>
+                      <span style={{fontSize:11,color:G.muted,marginLeft:10,fontFamily:"monospace"}}>{q.ref}</span>
+                      <span style={{fontSize:11,color:G.muted,marginLeft:10}}>📅 {fmtDate(q.quoteDate)}</span>
+                    </div>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      <span style={{fontSize:15,fontWeight:700,color:G.goldL,fontFamily:"'Playfair Display',serif"}}>{fmt(q.total)}</span>
+                    </div>
+                  </div>
+                  <div style={{fontSize:11,color:G.warn,marginBottom:10}}>🗂️ Archived {q.archivedAt?new Date(q.archivedAt).toLocaleDateString("en-CA",{month:"short",day:"numeric",year:"numeric"}):""}</div>
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                    <button onClick={()=>onRestoreQuote(q.id)} style={{background:G.ok+"18",border:`1px solid ${G.ok}44`,color:G.ok,borderRadius:7,padding:"7px 14px",fontSize:12,fontWeight:600,cursor:"pointer"}}>↩ Restore</button>
+                    <button onClick={()=>setPermDelId(q.id)} style={{background:G.danger+"10",border:`1px solid ${G.danger}44`,color:G.danger,borderRadius:7,padding:"7px 14px",fontSize:12,fontWeight:600,cursor:"pointer"}}>🗑 Delete Forever</button>
+                  </div>
+                </div>
+              ))}
+            </div>}
+        </div>}
+      </div>
+
+      {/* Archive confirm */}
+      {delConfirm&&<ModalWrap onClose={()=>setDelConfirm(null)} maxW={400}><div style={{padding:28,textAlign:"center"}}>
+        <div style={{fontSize:36,marginBottom:12}}>🗂️</div>
+        <h3 style={{color:G.cream,fontFamily:"'Playfair Display',serif",marginBottom:8,fontSize:18}}>Archive Quote?</h3>
+        <p style={{color:G.muted,fontSize:13,marginBottom:8}}>This quote will be removed from your active list but kept safely in the archive.</p>
+        <p style={{color:G.muted,fontSize:13,marginBottom:22}}>You can restore or permanently delete it from the Archive section below.</p>
+        <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+          <button onClick={()=>setDelConfirm(null)} style={{background:"#fff",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:7,padding:"10px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>Cancel</button>
+          <button onClick={()=>{onArchiveQuote(delConfirm);setDelConfirm(null);}} style={{background:G.warn,border:"none",color:"#fff",borderRadius:7,padding:"10px 18px",fontSize:13,fontWeight:700,cursor:"pointer"}}>🗂️ Archive</button>
+        </div>
+      </div></ModalWrap>}
+
+      {/* Permanent delete confirm */}
+      {permDelId&&<ModalWrap onClose={()=>setPermDelId(null)} maxW={380}><div style={{padding:28,textAlign:"center"}}>
+        <div style={{fontSize:36,marginBottom:12}}>⚠️</div>
+        <h3 style={{color:G.danger,fontFamily:"'Playfair Display',serif",marginBottom:8,fontSize:18}}>Permanently Delete?</h3>
+        <p style={{color:G.muted,fontSize:13,marginBottom:22}}>This quote will be gone forever. This cannot be undone.</p>
+        <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+          <button onClick={()=>setPermDelId(null)} style={{background:"#fff",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:7,padding:"10px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>Cancel</button>
+          <button onClick={()=>{onPermDeleteQuote(permDelId);setPermDelId(null);}} style={{background:G.danger,border:"none",color:"#fff",borderRadius:7,padding:"10px 18px",fontSize:13,fontWeight:700,cursor:"pointer"}}>Delete Forever</button>
+        </div>
+      </div></ModalWrap>}
+
+      {/* Client history modal */}
+      {clientHistory&&<ClientHistoryModal
+        clientName={clientHistory}
+        allQuotes={[...quotes,...archivedQuotes]}
+        onClose={()=>setClientHistory(null)}
+        onReopen={q=>{reopen(q);}}
+      />}
+
+      {/* Accept quote modal */}
+      {acceptQuote&&<AcceptQuoteModal quote={acceptQuote} onClose={()=>setAcceptQuote(null)} onConfirm={(result)=>{onAcceptQuote(acceptQuote,result);setAcceptQuote(null);}}/>}
+
+      {/* Undo confirmation modal */}
+      {undoConfirm&&<ModalWrap onClose={()=>setUndoConfirm(null)} maxW={400}>
+        <div style={{padding:28,textAlign:"center"}}>
+          <div style={{fontSize:36,marginBottom:12}}>↩️</div>
+          <h3 style={{color:G.cream,fontFamily:"'Playfair Display',serif",marginBottom:8,fontSize:18}}>Undo Acceptance?</h3>
+          <p style={{color:G.muted,fontSize:13,marginBottom:8}}>This will:</p>
+          <div style={{background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:10,padding:"12px 16px",marginBottom:22,textAlign:"left"}}>
+            <div style={{fontSize:12,color:G.cream,marginBottom:6}}>📦 Restore stock for all products in this quote</div>
+            <div style={{fontSize:12,color:G.cream,marginBottom:6}}>💳 Remove the auto-generated finance entry</div>
+            <div style={{fontSize:12,color:G.cream}}>⏳ Set quote status back to Pending</div>
+          </div>
+          <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+            <button onClick={()=>setUndoConfirm(null)} style={{background:"#fff",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:7,padding:"10px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>Cancel</button>
+            <button onClick={()=>{onUndoAcceptance(undoConfirm);setUndoConfirm(null);}} style={{background:G.warn,border:"none",color:"#fff",borderRadius:7,padding:"10px 18px",fontSize:13,fontWeight:700,cursor:"pointer"}}>↩️ Yes, Undo</button>
+          </div>
+        </div>
+      </ModalWrap>}
     </div>
   );
 }
@@ -505,6 +933,7 @@ function InvModal({initial,onSave,onClose}){
     setUploading(true);
     const r=new FileReader();
     r.onload=async ev=>{
+      // Compress photo before saving (13x smaller — ~30KB per photo)
       const compressed=await compressPhoto(ev.target.result);
       setF(x=>({...x,photo:compressed}));
       setUploading(false);
@@ -539,14 +968,14 @@ function InvModal({initial,onSave,onClose}){
         </div>
         <div className="lh-grid2" style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
           <div><label style={lbl}>Product Code</label><input style={inp} value={f.code} onChange={e=>set("code")(e.target.value)}/></div>
-          <div><label style={lbl}>Category</label><select style={{...inp,cursor:"pointer"}} value={f.cat} onChange={e=>set("cat")(e.target.value)}>{CATS.map(c=><option key={c} value={c}>{c}</option>)}</select></div>
+          <div><label style={lbl}>Category</label><select style={{...inp,cursor:"pointer"}} value={f.cat} onChange={e=>set("cat")(e.target.value)}>{[...CATS,SERVICE_CAT].map(c=><option key={c} value={c}>{c}</option>)}</select></div>
         </div>
         <div style={{marginBottom:10}}><label style={lbl}>Product Name</label><input style={inp} value={f.name} onChange={e=>set("name")(e.target.value)} placeholder="e.g. Velvet Chesterfield Sofa"/></div>
         <div style={{background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:10,padding:"12px 14px",marginBottom:10}}>
           <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.12em",color:G.gold,textTransform:"uppercase",marginBottom:10}}>💰 Pricing</div>
-          <div className="lh-grid2" style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:mg!==null?10:0}}>
-            <div><label style={lbl}>Selling Price (CAD)</label><input style={inp} type="number" value={f.price} onChange={e=>set("price")(e.target.value)} placeholder="e.g. 2499" min="0"/></div>
-            <div><label style={{...lbl,color:G.ok}}>Cost Price (CAD)</label><input style={{...inp,borderColor:"#a0c8b0"}} type="number" value={f.costPrice} onChange={e=>set("costPrice")(e.target.value)} placeholder="e.g. 1400" min="0"/></div>
+          <div className="lh-grid2" style={{display:"grid",gridTemplateColumns:f.cat===SERVICE_CAT?"1fr":"1fr 1fr",gap:10,marginBottom:mg!==null?10:0}}>
+            <div><label style={lbl}>{f.cat===SERVICE_CAT?"Service Price (CAD)":"Selling Price (CAD)"}</label><input style={inp} type="number" value={f.price} onChange={e=>set("price")(e.target.value)} placeholder={f.cat===SERVICE_CAT?"e.g. 150":"e.g. 2499"} min="0"/></div>
+            {f.cat!==SERVICE_CAT&&<div><label style={{...lbl,color:G.ok}}>Cost Price (CAD)</label><input style={{...inp,borderColor:"#a0c8b0"}} type="number" value={f.costPrice} onChange={e=>set("costPrice")(e.target.value)} placeholder="e.g. 1400" min="0"/></div>}
           </div>
           {mg!==null&&<div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
             {[{l:"Profit/Unit",v:fmt(profitUnit),c:profitUnit>=0?G.ok:G.danger},{l:"Margin %",v:mg+"%",c:marginColor(parseFloat(mg))},{l:"Markup %",v:markupPct+"%",c:G.gold}].map(s=>(
@@ -557,16 +986,22 @@ function InvModal({initial,onSave,onClose}){
             ))}
           </div>}
         </div>
-        <div className="lh-grid2" style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+        {/* Stock — hidden for services */}
+        {f.cat!==SERVICE_CAT&&<div className="lh-grid2" style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
           <div><label style={lbl}>Current Stock</label><input style={inp} type="number" value={f.stock} onChange={e=>set("stock")(e.target.value)} min="0"/></div>
           <div><label style={lbl}>Low Stock Alert At</label><input style={inp} type="number" value={f.minStock} onChange={e=>set("minStock")(e.target.value)} min="1"/></div>
-        </div>
-        <div style={{background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:10,padding:"12px 14px",marginBottom:10}}>
+        </div>}
+        {/* Service info banner */}
+        {f.cat===SERVICE_CAT&&<div style={{background:"#fff8e8",border:"1px solid #e8c27a44",borderRadius:10,padding:"10px 14px",marginBottom:10}}>
+          <div style={{fontSize:12,color:G.gold,fontWeight:600}}>🔧 Service / Add-on — no stock tracking needed. Just set a price and description.</div>
+        </div>}
+        {/* Dimensions — hidden for services */}
+        {f.cat!==SERVICE_CAT&&<div style={{background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:10,padding:"12px 14px",marginBottom:10}}>
           <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.12em",color:G.gold,textTransform:"uppercase",marginBottom:10}}>↔ Dimensions (cm) — optional</div>
           <div className="lh-grid3" style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
             {[["w","Width"],["h","Height"],["d","Depth"]].map(([k,l])=><div key={k}><label style={lbl}>{l}</label><input style={inp} type="number" value={f.dims?.[k]||""} onChange={e=>setDim(k)(e.target.value)} placeholder="cm" min="0"/></div>)}
           </div>
-        </div>
+        </div>}
         <div style={{marginBottom:18}}><label style={lbl}>Description</label><input style={inp} value={f.desc} onChange={e=>set("desc")(e.target.value)} placeholder="Short description…"/></div>
         <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
           <button onClick={onClose} style={{background:"transparent",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:7,padding:"10px 16px",fontSize:13,fontWeight:600,cursor:"pointer"}}>Cancel</button>
@@ -591,16 +1026,18 @@ function InventoryTab({prods,onSaveProduct,onDeleteProduct,onAdjustStock}){
   const [vw,setVw]=useState("grid");
 
   const filtered=useMemo(()=>prods.filter(p=>{
+    if(p.cat===SERVICE_CAT) return false; // Services only in Catalog, not Inventory
     const ms=(p.name+p.code).toLowerCase().includes(search.toLowerCase());
     const mc=cat==="All"||p.cat===cat;
     const mst=stockF==="All"||(stockF==="Low"&&p.stock<=p.minStock&&p.stock>0)||(stockF==="Out"&&p.stock===0)||(stockF==="OK"&&p.stock>p.minStock);
     return ms&&mc&&mst;
   }),[prods,search,cat,stockF]);
 
-  const totalSellVal=prods.reduce((s,p)=>s+p.price*p.stock,0);
-  const totalPotProfit=prods.reduce((s,p)=>s+(p.price-(p.costPrice||0))*p.stock,0);
-  const lowN=prods.filter(p=>p.stock<=p.minStock&&p.stock>0).length;
-  const outN=prods.filter(p=>p.stock===0).length;
+  const invProds=prods.filter(p=>p.cat!==SERVICE_CAT); // Exclude services from inventory stats
+  const totalSellVal=invProds.reduce((s,p)=>s+p.price*p.stock,0);
+  const totalPotProfit=invProds.reduce((s,p)=>s+(p.price-(p.costPrice||0))*p.stock,0);
+  const lowN=invProds.filter(p=>p.stock<=p.minStock&&p.stock>0).length;
+  const outN=invProds.filter(p=>p.stock===0).length;
 
   function exportCSV(){
     const h=["Code","Name","Category","Selling Price","Cost Price","Margin %","Profit/Unit","Stock","Min Stock","Status","W","H","D","Description"];
@@ -624,7 +1061,7 @@ function InventoryTab({prods,onSaveProduct,onDeleteProduct,onAdjustStock}){
       {/* Controls */}
       <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap",alignItems:"center"}}>
         <div style={{flex:1,minWidth:160,position:"relative"}}><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search name or code…" style={{...inp,paddingLeft:34}}/><span style={{position:"absolute",left:11,top:"50%",transform:"translateY(-50%)",color:G.muted,fontSize:14,pointerEvents:"none"}}>🔍</span></div>
-        <select value={cat} onChange={e=>setCat(e.target.value)} style={{...inp,width:"auto",minWidth:isMobile?"100%":140,cursor:"pointer"}}>{ALL_CATS.map(c=><option key={c} value={c}>{c}</option>)}</select>
+        <select value={cat} onChange={e=>setCat(e.target.value)} style={{...inp,width:"auto",minWidth:isMobile?"100%":140,cursor:"pointer"}}>{ALL_CATS_INV.map(c=><option key={c} value={c}>{c}</option>)}</select>
         <select value={stockF} onChange={e=>setStockF(e.target.value)} style={{...inp,width:"auto",minWidth:isMobile?"100%":120,cursor:"pointer"}}>{["All","OK","Low","Out"].map(s=><option key={s} value={s}>{{All:"All Stock",OK:"In Stock",Low:"Low Stock",Out:"Out of Stock"}[s]}</option>)}</select>
         <div style={{display:"flex",gap:4,width:isMobile?"100%":"auto"}}>
           {["grid","table"].map(v=><button key={v} onClick={()=>setVw(v)} style={{flex:isMobile?1:0,background:vw===v?G.goldL:"#fff",border:`1px solid ${vw===v?G.goldL:G.bdr}`,color:vw===v?"#fff":G.muted,borderRadius:7,padding:"8px 12px",fontSize:11,fontWeight:600,cursor:"pointer"}}>{{grid:"⊞ Grid",table:"☰ Table"}[v]}</button>)}
@@ -744,7 +1181,7 @@ function TxnModal({initial,onSave,onClose}){
 // ══════════════════════════════════════════════════════════════════════════
 //  FINANCE TAB
 // ══════════════════════════════════════════════════════════════════════════
-function FinanceTab({txns,onAddTxn,onDelTxn}){
+function FinanceTab({txns,archivedTxns,onAddTxn,onArchiveTxn,onRestoreTxn,onPermDeleteTxn,currentUser}){
   const isMobile=useIsMobile();
   const [search,setSearch]=useState("");
   const [typeF,setTypeF]=useState("All");
@@ -752,6 +1189,8 @@ function FinanceTab({txns,onAddTxn,onDelTxn}){
   const [editT,setEditT]=useState(null);
   const [delId,setDelId]=useState(null);
   const [view,setView]=useState("ledger");
+  const [showArchive,setShowArchive]=useState(false);
+  const [permDelId,setPermDelId]=useState(null);
   const balances=useMemo(()=>{let cash=0,debtor=0,creditor=0,equity=0,revenue=0,expenses=0;txns.forEach(t=>{const m=TXN_TYPES[t.type];if(!m)return;cash+=m.cash*t.amount;debtor+=m.debtor*t.amount;creditor+=m.creditor*t.amount;equity+=m.equity*t.amount;if(m.group==="Revenue")revenue+=t.amount;if(m.group==="Expense")expenses+=t.amount;});return{cash,debtor,creditor,equity,revenue,expenses,profit:revenue-expenses};},[txns]);
   const filtered=useMemo(()=>[...txns].sort((a,b)=>new Date(b.date)-new Date(a.date)).filter(t=>{const ms=(t.desc+t.party+(t.ref||"")).toLowerCase().includes(search.toLowerCase());const mt=typeF==="All"||t.type===typeF;return ms&&mt;}),[txns,search,typeF]);
   function exportCSV(){const h=["Date","Type","Party","Description","Amount","Cash Δ","Debtor Δ","Creditor Δ","Equity Δ","Reference","Notes"];const rows=filtered.map(t=>{const m=TXN_TYPES[t.type]||{};return[t.date,t.type,t.party,t.desc,t.amount.toFixed(2),(m.cash||0)*t.amount,(m.debtor||0)*t.amount,(m.creditor||0)*t.amount,(m.equity||0)*t.amount,t.ref||"",t.notes||""];});const csv=[h,...rows].map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(",")).join("\n");const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));a.download="lavishome_transactions.csv";a.click();}
@@ -786,8 +1225,67 @@ function FinanceTab({txns,onAddTxn,onDelTxn}){
         </tr>;})}
         </tbody></table></div>}
     </div>}
+    {/* Archive section — collapsed by default */}
+    {view==="ledger"&&<div style={{marginTop:28}}>
+      <button onClick={()=>setShowArchive(s=>!s)} style={{background:"none",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:8,padding:"8px 16px",fontSize:12,fontWeight:600,cursor:"pointer",display:"flex",alignItems:"center",gap:8}}>
+        <span>🗂️ Archived Transactions</span>
+        <span style={{background:G.surf2,borderRadius:999,padding:"1px 8px",fontSize:11,fontWeight:700,color:archivedTxns.length>0?G.warn:G.muted}}>{archivedTxns.length}</span>
+        <span style={{fontSize:11}}>{showArchive?"▲":"▼"}</span>
+      </button>
+      {showArchive&&<div style={{marginTop:12}}>
+        {archivedTxns.length===0
+          ?<div style={{background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:10,padding:"24px",textAlign:"center",color:G.muted,fontSize:13}}>No archived transactions</div>
+          :<div style={{background:G.surf,border:`1px solid ${G.bdr}`,borderRadius:12,overflow:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:700}}>
+              <thead><tr style={{borderBottom:`2px solid ${G.bdr}`,background:G.surf2}}>
+                {["Date","Type","Party","Description","Amount","Archived","Actions"].map((h,i)=><th key={i} style={{padding:"10px 12px",textAlign:"left",color:G.muted,fontSize:9,fontWeight:700,letterSpacing:"0.12em",textTransform:"uppercase",whiteSpace:"nowrap"}}>{h}</th>)}
+              </tr></thead>
+              <tbody>{archivedTxns.map((t,idx)=>{
+                const m=TXN_TYPES[t.type]||{};
+                return<tr key={t.id} style={{borderBottom:`1px solid ${G.bdr}`,background:idx%2===0?"#fff":G.surf2,opacity:0.75}}>
+                  <td style={{padding:"8px 12px",color:G.muted,fontSize:11,whiteSpace:"nowrap"}}>{fmtDate(t.date)}</td>
+                  <td style={{padding:"8px 12px",whiteSpace:"nowrap"}}><span style={{display:"inline-flex",alignItems:"center",gap:5,padding:"3px 8px",borderRadius:6,background:(m.color||G.gold)+"18",color:m.color||G.gold,fontSize:10,fontWeight:700,border:`1px solid ${(m.color||G.gold)}33`}}>{TXN_TYPES[t.type]?.icon} {t.type}</span></td>
+                  <td style={{padding:"8px 12px",color:G.cream,maxWidth:100,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.party}</td>
+                  <td style={{padding:"8px 12px",color:G.muted,maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.desc}</td>
+                  <td style={{padding:"8px 12px",color:G.goldL,fontWeight:700,whiteSpace:"nowrap"}}>{fmt(t.amount)}</td>
+                  <td style={{padding:"8px 12px",color:G.muted,fontSize:10,whiteSpace:"nowrap"}}>{t.archivedAt?new Date(t.archivedAt).toLocaleDateString("en-CA",{month:"short",day:"numeric"}):""}</td>
+                  <td style={{padding:"8px 12px"}}><div style={{display:"flex",gap:6}}>
+                    <button onClick={()=>onRestoreTxn(t.id)} style={{background:G.ok+"18",border:`1px solid ${G.ok}44`,color:G.ok,borderRadius:5,padding:"3px 10px",fontSize:10,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>↩ Restore</button>
+                    <button onClick={()=>setPermDelId(t.id)} style={{background:G.danger+"10",border:`1px solid ${G.danger}44`,color:G.danger,borderRadius:5,padding:"3px 10px",fontSize:10,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>🗑 Delete Forever</button>
+                  </div></td>
+                </tr>;
+              })}</tbody>
+            </table>
+          </div>}
+      </div>}
+    </div>}
+
     {(modal==="add"||modal==="edit")&&<TxnModal initial={editT} onSave={p=>{onAddTxn(p);setModal(null);setEditT(null);}} onClose={()=>{setModal(null);setEditT(null);}}/>}
-    {modal==="del"&&<ModalWrap onClose={()=>{setModal(null);setDelId(null);}} maxW={360}><div style={{padding:28,textAlign:"center"}}><div style={{fontSize:36,marginBottom:12}}>🗑️</div><h3 style={{color:G.cream,fontFamily:"'Playfair Display',serif",marginBottom:8,fontSize:18}}>Delete Transaction?</h3><p style={{color:G.muted,fontSize:13,marginBottom:22}}>This will affect your balances.</p><div style={{display:"flex",gap:10,justifyContent:"center"}}><button onClick={()=>{setModal(null);setDelId(null);}} style={{background:"#fff",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:7,padding:"10px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>Cancel</button><button onClick={()=>{onDelTxn(delId);setModal(null);setDelId(null);}} style={{background:G.danger,border:"none",color:"#fff",borderRadius:7,padding:"10px 18px",fontSize:13,fontWeight:700,cursor:"pointer"}}>Delete</button></div></div></ModalWrap>}
+    {/* Permanent delete confirm */}
+    {permDelId&&<ModalWrap onClose={()=>setPermDelId(null)} maxW={380}>
+      <div style={{padding:28,textAlign:"center"}}>
+        <div style={{fontSize:36,marginBottom:12}}>⚠️</div>
+        <h3 style={{color:G.danger,fontFamily:"'Playfair Display',serif",marginBottom:8,fontSize:18}}>Permanently Delete?</h3>
+        <p style={{color:G.muted,fontSize:13,marginBottom:22}}>This transaction will be gone forever and cannot be recovered. Are you absolutely sure?</p>
+        <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+          <button onClick={()=>setPermDelId(null)} style={{background:"#fff",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:7,padding:"10px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>Cancel</button>
+          <button onClick={()=>{onPermDeleteTxn(permDelId);setPermDelId(null);}} style={{background:G.danger,border:"none",color:"#fff",borderRadius:7,padding:"10px 18px",fontSize:13,fontWeight:700,cursor:"pointer"}}>Delete Forever</button>
+        </div>
+      </div>
+    </ModalWrap>}
+    {/* Archive confirm — soft delete */}
+    {modal==="del"&&<ModalWrap onClose={()=>{setModal(null);setDelId(null);}} maxW={400}>
+      <div style={{padding:28,textAlign:"center"}}>
+        <div style={{fontSize:36,marginBottom:12}}>🗂️</div>
+        <h3 style={{color:G.cream,fontFamily:"'Playfair Display',serif",marginBottom:8,fontSize:18}}>Archive Transaction?</h3>
+        <p style={{color:G.muted,fontSize:13,marginBottom:8}}>The transaction will be removed from your ledger and balances but kept in your archive.</p>
+        <p style={{color:G.muted,fontSize:13,marginBottom:22}}>You or your manager can restore or permanently delete it from the Archive section.</p>
+        <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+          <button onClick={()=>{setModal(null);setDelId(null);}} style={{background:"#fff",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:7,padding:"10px 18px",fontSize:13,fontWeight:600,cursor:"pointer"}}>Cancel</button>
+          <button onClick={()=>{onArchiveTxn(delId);setModal(null);setDelId(null);}} style={{background:G.warn,border:"none",color:"#fff",borderRadius:7,padding:"10px 18px",fontSize:13,fontWeight:700,cursor:"pointer"}}>🗂️ Archive</button>
+        </div>
+      </div>
+    </ModalWrap>}
   </div>);
 }
 
@@ -799,37 +1297,76 @@ export default function LavisHomeApp(){
   const [prods,setProds]=useState([]);
   const [txns,setTxns]=useState([]);
   const [quotes,setQuotes]=useState([]);
+  const [archivedTxns,setArchivedTxns]=useState([]);
+  const [archivedQuotes,setArchivedQuotes]=useState([]);
   const [loaded,setLoaded]=useState(false);
   const [tab,setTab]=useState("inventory");
   const [saved,setSaved]=useState("");
+  // ── Auth state
+  const [authState,setAuthState]=useState("loading"); // "loading" | "loggedOut" | "denied" | "approved"
+  const [currentUser,setCurrentUser]=useState(null);
+  const [loginLoading,setLoginLoading]=useState(false);
+  const [loginError,setLoginError]=useState("");
+  const [userProfile,setUserProfile]=useState(null);  // {displayName, email, uid}
+  const [needsName,setNeedsName]=useState(false);     // true = first login, show name modal
 
-  // ── Firebase: inventory now uses ONE doc per product (lavishome_products collection)
-  // ── transactions and quotes remain as single docs (no photos = no size issue)
+  // ── Google Auth listener — runs first, loads user profile, then data
   useEffect(()=>{
-    let invOk=false,txnOk=false,qtOk=false;
-    function check(){if(invOk&&txnOk&&qtOk)setLoaded(true);}
+    const unsub=onAuthStateChanged(auth,async user=>{
+      if(!user){
+        setAuthState("loggedOut");setCurrentUser(null);
+        setUserProfile(null);setNeedsName(false);
+        return;
+      }
+      const email=user.email?.toLowerCase();
+      const approved=APPROVED_EMAILS.map(e=>e.toLowerCase()).includes(email);
+      if(!approved){setCurrentUser(user);setAuthState("denied");return;}
+      // Load saved display name from Firebase
+      try{
+        const profileDoc=await getDoc(doc(db,"lavishome_users",user.uid));
+        if(profileDoc.exists()){
+          setUserProfile(profileDoc.data());
+          setNeedsName(false);
+        } else {
+          // First login — no name saved yet
+          setUserProfile(null);
+          setNeedsName(true);
+        }
+      }catch{
+        // If profile load fails, still let them in — name can be set later
+        setUserProfile(null);
+        setNeedsName(true);
+      }
+      setCurrentUser(user);
+      setAuthState("approved");
+    });
+    return()=>unsub();
+  },[]);
+
+  // ── Firebase data listeners — only run when user is approved
+  useEffect(()=>{
+    if(authState!=="approved")return;
+    let invOk=false,txnOk=false,qtOk=false,aTxnOk=false,aQtOk=false;
+    function check(){if(invOk&&txnOk&&qtOk&&aTxnOk&&aQtOk)setLoaded(true);}
     const timeout=setTimeout(()=>{
       if(!invOk)setProds(SAMPLE_INV);
       if(!txnOk)setTxns(SAMPLE_TXN);
       if(!qtOk)setQuotes([]);
+      if(!aTxnOk)setArchivedTxns([]);
+      if(!aQtOk)setArchivedQuotes([]);
       setLoaded(true);
     },8000);
 
-    // Products: listen to entire collection — each product is its own document
-    // This means no size limit — each product can be up to 1MB on its own
     const unsubInv=onSnapshot(
       collection(db,"lavishome_products"),
       snap=>{
         const items=snap.docs.map(d=>d.data());
-        // If collection is empty, check old structure and migrate
         if(items.length===0&&!invOk){
           getDoc(doc(db,"lavishome","inventory")).then(oldDoc=>{
             if(oldDoc.exists()&&oldDoc.data().items?.length>0){
               const oldItems=oldDoc.data().items;
-              Promise.all(oldItems.map(p=>setDoc(doc(db,"lavishome_products",p.id),p)))
-                .then(()=>console.log("Migrated",oldItems.length,"products to new structure"));
+              Promise.all(oldItems.map(p=>setDoc(doc(db,"lavishome_products",p.id),p)));
             } else {
-              // Truly empty — seed with sample data so app isn't blank
               Promise.all(SAMPLE_INV.map(p=>setDoc(doc(db,"lavishome_products",p.id),p)));
             }
           }).catch(()=>{});
@@ -838,7 +1375,6 @@ export default function LavisHomeApp(){
       },
       ()=>{setProds(SAMPLE_INV);invOk=true;check();}
     );
-
     const unsubTxn=onSnapshot(doc(db,"lavishome","transactions"),
       snap=>{setTxns(snap.exists()?(snap.data().items||[]):SAMPLE_TXN);txnOk=true;check();},
       ()=>{setTxns(SAMPLE_TXN);txnOk=true;check();}
@@ -847,8 +1383,94 @@ export default function LavisHomeApp(){
       snap=>{setQuotes(snap.exists()?(snap.data().items||[]):[]);qtOk=true;check();},
       ()=>{setQuotes([]);qtOk=true;check();}
     );
-    return()=>{unsubInv();unsubTxn();unsubQt();clearTimeout(timeout);};
-  },[]);
+    const unsubATxn=onSnapshot(doc(db,"lavishome","archivedTransactions"),
+      snap=>{setArchivedTxns(snap.exists()?(snap.data().items||[]):[]);aTxnOk=true;check();},
+      ()=>{setArchivedTxns([]);aTxnOk=true;check();}
+    );
+    const unsubAQt=onSnapshot(doc(db,"lavishome","archivedQuotes"),
+      snap=>{setArchivedQuotes(snap.exists()?(snap.data().items||[]):[]);aQtOk=true;check();},
+      ()=>{setArchivedQuotes([]);aQtOk=true;check();}
+    );
+    return()=>{unsubInv();unsubTxn();unsubQt();unsubATxn();unsubAQt();clearTimeout(timeout);};
+  },[authState]);
+
+  // ── Auth handlers
+  async function handleLogin(){
+    setLoginLoading(true);setLoginError("");
+    try{await signInWithPopup(auth,googleProvider);}
+    catch(e){
+      if(e.code==="auth/popup-closed-by-user")setLoginError("Sign-in was cancelled. Please try again.");
+      else setLoginError("Sign-in failed. Please try again.");
+    }
+    setLoginLoading(false);
+  }
+  async function handleSignOut(){
+    await signOut(auth);
+    setAuthState("loggedOut");setCurrentUser(null);setLoaded(false);
+    setUserProfile(null);setNeedsName(false);
+    setProds([]);setTxns([]);setQuotes([]);setArchivedTxns([]);setArchivedQuotes([]);
+  }
+
+  function handleNameSaved(name){
+    setUserProfile({uid:currentUser.uid,email:currentUser.email,displayName:name});
+    setNeedsName(false);
+  }
+
+  // ── Archive: transactions
+  async function archiveTxn(id){
+    const txn=txns.find(t=>t.id===id);if(!txn)return;
+    const archived={...txn,archived:true,archivedAt:Date.now(),archivedBy:userProfile?.displayName||currentUser?.email||"unknown"};
+    const newTxns=txns.filter(t=>t.id!==id);
+    const newArchived=[...archivedTxns,archived];
+    await saveWithRetry(doc(db,"lavishome","transactions"),{items:newTxns});
+    await saveWithRetry(doc(db,"lavishome","archivedTransactions"),{items:newArchived});
+    setTxns(newTxns);setArchivedTxns(newArchived);
+    setSaved("Archived ✓");setTimeout(()=>setSaved(""),2000);
+  }
+  async function restoreTxn(id){
+    const txn=archivedTxns.find(t=>t.id===id);if(!txn)return;
+    const restored={...txn,archived:false,archivedAt:null,archivedBy:null};
+    const newArchived=archivedTxns.filter(t=>t.id!==id);
+    const newTxns=[...txns,restored];
+    await saveWithRetry(doc(db,"lavishome","transactions"),{items:newTxns});
+    await saveWithRetry(doc(db,"lavishome","archivedTransactions"),{items:newArchived});
+    setTxns(newTxns);setArchivedTxns(newArchived);
+    setSaved("Restored ✓");setTimeout(()=>setSaved(""),2000);
+  }
+  async function permDeleteTxn(id){
+    const newArchived=archivedTxns.filter(t=>t.id!==id);
+    await saveWithRetry(doc(db,"lavishome","archivedTransactions"),{items:newArchived});
+    setArchivedTxns(newArchived);
+    setSaved("Permanently deleted");setTimeout(()=>setSaved(""),2000);
+  }
+
+  // ── Archive: quotes
+  async function archiveQuote(id){
+    const qt=quotes.find(q=>q.id===id);if(!qt)return;
+    const archived={...qt,archived:true,archivedAt:Date.now(),archivedBy:userProfile?.displayName||currentUser?.email||"unknown"};
+    const newQuotes=quotes.filter(q=>q.id!==id);
+    const newArchived=[...archivedQuotes,archived];
+    await saveWithRetry(doc(db,"lavishome","quotes"),{items:newQuotes});
+    await saveWithRetry(doc(db,"lavishome","archivedQuotes"),{items:newArchived});
+    setQuotes(newQuotes);setArchivedQuotes(newArchived);
+    setSaved("Archived ✓");setTimeout(()=>setSaved(""),2000);
+  }
+  async function restoreQuote(id){
+    const qt=archivedQuotes.find(q=>q.id===id);if(!qt)return;
+    const restored={...qt,archived:false,archivedAt:null,archivedBy:null};
+    const newArchived=archivedQuotes.filter(q=>q.id!==id);
+    const newQuotes=[...quotes,restored];
+    await saveWithRetry(doc(db,"lavishome","quotes"),{items:newQuotes});
+    await saveWithRetry(doc(db,"lavishome","archivedQuotes"),{items:newArchived});
+    setQuotes(newQuotes);setArchivedQuotes(newArchived);
+    setSaved("Restored ✓");setTimeout(()=>setSaved(""),2000);
+  }
+  async function permDeleteQuote(id){
+    const newArchived=archivedQuotes.filter(q=>q.id!==id);
+    await saveWithRetry(doc(db,"lavishome","archivedQuotes"),{items:newArchived});
+    setArchivedQuotes(newArchived);
+    setSaved("Permanently deleted");setTimeout(()=>setSaved(""),2000);
+  }
 
   function flash(){setSaved("Saved ✓");setTimeout(()=>setSaved(""),2000);}
 
@@ -892,8 +1514,118 @@ export default function LavisHomeApp(){
   function updateQuoteStatus(id,status){persistQuotes(quotes.map(q=>q.id===id?{...q,status}:q));}
   function deleteQuote(id){persistQuotes(quotes.filter(q=>q.id!==id));}
 
+  // ── Duplicate a quote — new ref, today date, status Pending
+  function duplicateQuote(q){
+    const newRef = makeRef();
+    const today = todayStr();
+    const newQuote = {
+      ...q,
+      id: gid(),
+      ref: newRef,
+      quoteDate: today,
+      status: "Pending",
+      createdAt: Date.now(),
+      acceptedAt: null,
+      acceptedTxnId: null,
+      acceptedItems: null,
+      archived: false,
+      archivedAt: null,
+      archivedBy: null,
+    };
+    persistQuotes([newQuote, ...quotes]);
+    setSaved("Quote duplicated ✓");
+    setTimeout(()=>setSaved(""),2000);
+  }
+
+  // ── Accept a quote: deduct stock + create finance entry
+  async function handleAcceptQuote(quote, result){
+    const{payType, items, finalTotal}=result;
+    const today=new Date().toISOString().split("T")[0];
+    const txnId=gid();
+
+    // 1 — Deduct stock for each confirmed product (allow negative — Option B)
+    for(const it of items){
+      const prod=prods.find(p=>p.id===it.id);
+      if(prod){
+        const updated={...prod, stock: prod.stock - it.confirmedQty};
+        await handleSaveProduct(updated);
+      }
+    }
+
+    // 2 — Create finance entry tagged with quoteId so we can undo it later
+    const newTxn={
+      id: txnId,
+      date: today,
+      type: payType,
+      party: quote.clientName,
+      desc: `${quote.ref} — ${items.map(it=>it.name+" ×"+it.confirmedQty).join(", ")}`,
+      amount: finalTotal,
+      ref: quote.ref,
+      notes: "Auto-generated from accepted quote",
+      autoFromQuote: true,
+      quoteId: quote.id,
+      ts: Date.now(),
+    };
+    const newTxns=[...txns, newTxn];
+    await persistTxn(newTxns);
+
+    // 3 — Mark quote Accepted + store snapshot of confirmed items for undo
+    const updatedQuotes=quotes.map(q=>q.id===quote.id?{
+      ...q,
+      status:"Accepted",
+      acceptedAt: Date.now(),
+      acceptedTxnId: txnId,
+      acceptedItems: items.map(it=>({id:it.id, confirmedQty:it.confirmedQty, confirmedPrice:it.confirmedPrice})),
+    }:q);
+    await persistQuotes(updatedQuotes);
+    setSaved("Accepted ✓ — stock & finance updated");
+    setTimeout(()=>setSaved(""),3000);
+  }
+
+  // ── Undo acceptance: restore stock + remove finance entry + reset to Pending
+  async function handleUndoAcceptance(quote){
+    // 1 — Restore stock
+    if(quote.acceptedItems){
+      for(const it of quote.acceptedItems){
+        const prod=prods.find(p=>p.id===it.id);
+        if(prod){
+          const restored={...prod, stock: prod.stock + it.confirmedQty};
+          await handleSaveProduct(restored);
+        }
+      }
+    }
+
+    // 2 — Remove the auto-generated finance entry
+    if(quote.acceptedTxnId){
+      const newTxns=txns.filter(t=>t.id!==quote.acceptedTxnId);
+      await persistTxn(newTxns);
+    }
+
+    // 3 — Reset quote to Pending, clear acceptance data
+    const updatedQuotes=quotes.map(q=>q.id===quote.id?{
+      ...q,
+      status:"Pending",
+      acceptedAt: null,
+      acceptedTxnId: null,
+      acceptedItems: null,
+    }:q);
+    await persistQuotes(updatedQuotes);
+    setSaved("Undone ✓ — stock & finance restored");
+    setTimeout(()=>setSaved(""),3000);
+  }
+
   const cash=useMemo(()=>txns.reduce((s,t)=>{const m=TXN_TYPES[t.type];return s+(m?m.cash*t.amount:0);},0),[txns]);
   const pendingQuotes=quotes.filter(q=>q.status==="Pending").length;
+
+  // ── Auth screens shown before anything else
+  if(authState==="loading")return(
+    <div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:G.bg,flexDirection:"column",gap:14}}>
+      <div style={{color:G.goldL,fontFamily:"'Playfair Display',serif",fontSize:20}}>Lavishome</div>
+      <div style={{color:G.muted,fontSize:13}}>Checking access…</div>
+    </div>
+  );
+  if(authState==="loggedOut")return <LoginScreen onLogin={handleLogin} loading={loginLoading} error={loginError}/>;
+  if(authState==="denied")return <AccessDeniedScreen user={currentUser} onSignOut={handleSignOut}/>;
 
   if(!loaded)return(
     <div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:G.bg,flexDirection:"column",gap:14}}>
@@ -912,6 +1644,9 @@ export default function LavisHomeApp(){
   return(
     <div style={{minHeight:"100vh",background:G.bg,fontFamily:"'DM Sans',sans-serif",color:G.cream}}>
       <style>{GLOBAL_CSS}</style>
+
+      {/* ── Name entry modal — first login only ── */}
+      {needsName&&currentUser&&<SetNameModal user={currentUser} onSave={handleNameSaved}/>}
 
       {/* ── Header ── */}
       <div style={{background:G.surf,borderBottom:`1px solid ${G.bdr}`,boxShadow:"0 1px 6px rgba(0,0,0,0.07)",position:"sticky",top:0,zIndex:50}}>
@@ -932,15 +1667,22 @@ export default function LavisHomeApp(){
             ))}
           </div>
           <div style={{display:"flex",alignItems:"center",gap:10}}>
-            <div style={{textAlign:"right"}}>
+            {!isMobile&&<div style={{textAlign:"right"}}>
               <div style={{fontSize:8,color:G.muted,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:2}}>💵 Cash</div>
               <div style={{fontSize:isMobile?12:14,fontWeight:700,color:cash>=0?G.ok:G.danger,fontFamily:"'Playfair Display',serif"}}>{fmt(cash)}</div>
-            </div>
+            </div>}
             <div style={{display:"flex",alignItems:"center",gap:5,background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:999,padding:"4px 8px"}}>
               <div style={{width:6,height:6,borderRadius:"50%",background:G.ok}}></div>
               <span style={{fontSize:9,color:G.muted,fontWeight:600}}>Live</span>
             </div>
-            {saved&&<span style={{fontSize:11,color:saved.includes("failed")?"#b83232":G.ok,fontWeight:600}}>{saved}</span>}
+            {saved&&<span style={{fontSize:11,color:saved.includes("failed")||saved.includes("denied")?"#b83232":G.ok,fontWeight:600}}>{saved}</span>}
+            {/* User avatar + sign out */}
+            {currentUser&&!isMobile&&<div style={{display:"flex",alignItems:"center",gap:6,background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:999,padding:"4px 10px"}}>
+              <span style={{fontSize:11,color:G.cream,fontWeight:700,maxWidth:120,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                {userProfile?.displayName||currentUser.displayName?.split(" ")[0]||currentUser.email?.split("@")[0]}
+              </span>
+              <button onClick={handleSignOut} style={{background:"none",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:999,padding:"2px 8px",fontSize:9,fontWeight:700,cursor:"pointer"}}>Sign out</button>
+            </div>}
           </div>
         </div>
       </div>
@@ -948,9 +1690,20 @@ export default function LavisHomeApp(){
       {/* ── Body ── */}
       <div style={{maxWidth:1300,margin:"0 auto",padding:isMobile?"16px 12px 100px":"28px 24px 100px"}}>
         {tab==="inventory"&&<InventoryTab prods={prods} onSaveProduct={handleSaveProduct} onDeleteProduct={handleDeleteProduct} onAdjustStock={handleAdjustStock}/>}
-        {tab==="catalog"  &&<CatalogTab prods={prods} onSaveQuote={saveQuote}/>}
-        {tab==="quotes"   &&<QuoteHistoryTab quotes={quotes} onUpdateStatus={updateQuoteStatus} onDelete={deleteQuote}/>}
-        {tab==="finance"  &&<FinanceTab txns={txns} onAddTxn={addOrUpdateTxn} onDelTxn={delTxn}/>}
+        {tab==="catalog"  &&<CatalogTab prods={prods} onSaveQuote={saveQuote} userProfile={userProfile}/>}
+        {tab==="quotes"   &&<QuoteHistoryTab
+          quotes={quotes} archivedQuotes={archivedQuotes}
+          onUpdateStatus={updateQuoteStatus}
+          onArchiveQuote={archiveQuote} onRestoreQuote={restoreQuote} onPermDeleteQuote={permDeleteQuote}
+          onAcceptQuote={handleAcceptQuote} onUndoAcceptance={handleUndoAcceptance}
+          onDuplicateQuote={duplicateQuote}
+        />}
+        {tab==="finance"  &&<FinanceTab
+          txns={txns} archivedTxns={archivedTxns}
+          onAddTxn={addOrUpdateTxn}
+          onArchiveTxn={archiveTxn} onRestoreTxn={restoreTxn} onPermDeleteTxn={permDeleteTxn}
+          currentUser={currentUser}
+        />}
       </div>
 
       {/* ── Footer ── */}
