@@ -26,7 +26,10 @@ const googleProvider = new GoogleAuthProvider();
 // Add your team's Google email addresses here.
 // Only these emails can log in. Anyone else sees "Access Denied".
 const APPROVED_EMAILS = [
-  "sales@lavishome.ca",
+  "rohit@lavishome.ca",       // ← replace with your real emails
+  "team1@lavishome.ca",
+  "team2@lavishome.ca",
+  "team3@lavishome.ca",
 ];
 
 const CATS     = ["Sofas","Beds","Executive Desk","Coffee Tables","Consoles"];
@@ -583,7 +586,7 @@ function AcceptQuoteModal({quote, onConfirm, onClose}){
         </div>
 
         {/* Info banner */}
-        <div style={{background:G.ok+"10",border:,borderRadius:10,padding:"10px 14px",marginBottom:18,fontSize:12,color:G.ok,fontWeight:600}}>
+        <div style={{background:G.ok+"10",border:`1px solid ${G.ok}33`,borderRadius:10,padding:"10px 14px",marginBottom:18,fontSize:12,color:G.ok,fontWeight:600}}>
           ✅ Confirming this will automatically deduct stock and create a finance entry.
         </div>
 
@@ -592,7 +595,7 @@ function AcceptQuoteModal({quote, onConfirm, onClose}){
           <label style={lbl}>Payment Type</label>
           <div style={{display:"flex",gap:10}}>
             {["Sale – Cash","Sale – Credit"].map(t=>(
-              <button key={t} onClick={()=>setPayType(t)} style={{flex:1,background:payType===t?G.goldL:"#fff",border:,color:payType===t?"#fff":G.muted,borderRadius:8,padding:"10px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+              <button key={t} onClick={()=>setPayType(t)} style={{flex:1,background:payType===t?G.goldL:"#fff",border:`1px solid ${payType===t?G.goldL:G.bdr}`,color:payType===t?"#fff":G.muted,borderRadius:8,padding:"10px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
                 {t==="Sale – Cash"?"💰 Cash Payment":"📋 Credit (Pay Later)"}
               </button>
             ))}
@@ -601,13 +604,13 @@ function AcceptQuoteModal({quote, onConfirm, onClose}){
         </div>
 
         {/* Editable product list */}
-        <div style={{background:G.surf2,border:,borderRadius:10,padding:"14px 16px",marginBottom:18}}>
+        <div style={{background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:10,padding:"14px 16px",marginBottom:18}}>
           <div style={{fontSize:10,color:G.gold,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:12}}>Confirm Products & Quantities</div>
           <div style={{fontSize:11,color:G.muted,marginBottom:10}}>Adjust if client changed their mind on quantities or negotiated a different price.</div>
           {items.map(it=>(
             <div key={it.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 0",borderBottom:}}>
               {/* Thumb */}
-              <div style={{width:40,height:40,borderRadius:7,overflow:"hidden",background:G.surf,border:,flexShrink:0}}>
+              <div style={{width:40,height:40,borderRadius:7,overflow:"hidden",background:G.surf,border:`1px solid ${G.bdr}`,flexShrink:0}}>
                 {it.photo?<img src={it.photo} style={{width:"100%",height:"100%",objectFit:"cover"}} alt={it.name}/>:<div style={{width:"100%",height:"100%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>🏠</div>}
               </div>
               {/* Name */}
@@ -636,10 +639,10 @@ function AcceptQuoteModal({quote, onConfirm, onClose}){
         </div>
 
         {/* Final total */}
-        <div style={{background:G.surf2,border:,borderRadius:10,padding:"12px 16px",marginBottom:22}}>
+        <div style={{background:G.surf2,border:`1px solid ${G.bdr}`,borderRadius:10,padding:"12px 16px",marginBottom:22}}>
           <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontSize:13,color:G.muted}}>Subtotal</span><span style={{fontSize:13,fontWeight:600,color:G.cream}}>{fmt(total)}</span></div>
           {discAmt>0&&<div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontSize:13,color:G.warn}}>Discount</span><span style={{fontSize:13,fontWeight:600,color:G.warn}}>−{fmt(discAmt)}</span></div>}
-          <div style={{display:"flex",justifyContent:"space-between",borderTop:,paddingTop:10,marginTop:6}}>
+          <div style={{display:"flex",justifyContent:"space-between",borderTop:`1px solid ${G.bdr}`,paddingTop:10,marginTop:6}}>
             <span style={{fontSize:15,fontWeight:700,color:G.goldL,fontFamily:"'Playfair Display',serif"}}>Final Total (CAD)</span>
             <span style={{fontSize:isMobile?18:20,fontWeight:700,color:G.goldL,fontFamily:"'Playfair Display',serif"}}>{fmt(finalTotal)}</span>
           </div>
@@ -647,7 +650,7 @@ function AcceptQuoteModal({quote, onConfirm, onClose}){
 
         {/* Confirm buttons */}
         <div style={{display:"flex",gap:10}}>
-          <button onClick={onClose} style={{flex:1,background:"#fff",border:,color:G.muted,borderRadius:8,padding:"11px",fontSize:13,fontWeight:600,cursor:"pointer"}}>Cancel</button>
+          <button onClick={onClose} style={{flex:1,background:"#fff",border:`1px solid ${G.bdr}`,color:G.muted,borderRadius:8,padding:"11px",fontSize:13,fontWeight:600,cursor:"pointer"}}>Cancel</button>
           <button onClick={handleConfirm} style={{flex:2,background:G.ok,border:"none",color:"#fff",borderRadius:8,padding:"11px",fontSize:13,fontWeight:700,cursor:"pointer"}}>✅ Confirm Acceptance</button>
         </div>
       </div>
