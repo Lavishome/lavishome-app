@@ -3,7 +3,7 @@ import { getFirestore } from "firebase/firestore";
 import { getAuth } from "firebase/auth";
 
 const firebaseConfig = {
-  apiKey: "AIzaSyD1lHiiTIMQ2ZBux9Kt_el_iW3yszdd1Ck",
+  apiKey: "AIzaSyDllHiiTIMQ2ZBux9Kt_el_iW3yszdd1Ck",
   authDomain: "lavishome.firebaseapp.com",
   projectId: "lavishome",
   storageBucket: "lavishome.firebasestorage.app",
